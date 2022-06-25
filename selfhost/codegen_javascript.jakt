@@ -198,7 +198,7 @@ struct JavascriptCodeGenerator {
         QuotedString(val) => "\"" + val + "\""
         // ByteConstant(val) => "'" + val + "'"
         // CharacterConstant(val) => "'" + val + "'"
-        // Var(var) => var.name
+        Var(var) => var.name
         // IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
@@ -584,15 +584,15 @@ struct JavascriptCodeGenerator {
     }
 
     function codegen_statement(mut this, statement: CheckedStatement) throws -> String => match statement {
-        Throw(expression) => "return " + .codegen_expression(expression) + ";"
-        Continue => match .control_flow_state.passes_through_match {
-            true => "return JaktInternal::LoopContinue{};"
-            else => "continue;"
-        }
-        Break => match .control_flow_state.passes_through_match {
-            true => "return JaktInternal::LoopBreak{};"
-            else => "break;"
-        }
+        // Throw(expression) => "return " + .codegen_expression(expression) + ";"
+        // Continue => match .control_flow_state.passes_through_match {
+        //     true => "return JaktInternal::LoopContinue{};"
+        //     else => "continue;"
+        // }
+        // Break => match .control_flow_state.passes_through_match {
+        //     true => "return JaktInternal::LoopBreak{};"
+        //     else => "break;"
+        // }
         Expression(expression) => .codegen_expression(expression) + ";\n"
         Defer(statement) => {
             // NOTE: We let the preprocessor generate a unique name for the RAII helper.
@@ -613,31 +613,31 @@ struct JavascriptCodeGenerator {
             true => "return (" + .codegen_expression(expression!) + ");\n"
             else => "return;\n"
         }
-        Loop(block) => {
-            mut output = ""
-            output += "for (;;) {"
-            let last_control_flow = .control_flow_state
-            .control_flow_state = last_control_flow.enter_loop()
-            let block_str = .codegen_block(block)
-            .control_flow_state = last_control_flow
-            output += block_str
-            output += "}"
-            yield output
-        }
-        While(condition, block) => {
-            mut output = ""
-            output += "while ("
-            output += .codegen_expression(expression: condition)
-            output += ") "
-            {
-                let last_control_flow = .control_flow_state
-                .control_flow_state = last_control_flow.enter_loop()
-                let code = .codegen_block(block)
-                .control_flow_state = last_control_flow
-                output += code
-            }
-            yield output
-        }
+        // Loop(block) => {
+        //     mut output = ""
+        //     output += "for (;;) {"
+        //     let last_control_flow = .control_flow_state
+        //     .control_flow_state = last_control_flow.enter_loop()
+        //     let block_str = .codegen_block(block)
+        //     .control_flow_state = last_control_flow
+        //     output += block_str
+        //     output += "}"
+        //     yield output
+        // }
+        // While(condition, block) => {
+        //     mut output = ""
+        //     output += "while ("
+        //     output += .codegen_expression(expression: condition)
+        //     output += ") "
+        //     {
+        //         let last_control_flow = .control_flow_state
+        //         .control_flow_state = last_control_flow.enter_loop()
+        //         let code = .codegen_block(block)
+        //         .control_flow_state = last_control_flow
+        //         output += code
+        //     }
+        //     yield output
+        // }
         Block(block) => .codegen_block(block)
         Garbage => {
             panic("Garbage statement in codegen")
@@ -651,8 +651,8 @@ struct JavascriptCodeGenerator {
             if not var.is_mutable {
                 output += "const "
             }
-            output += .codegen_type(var.type_id)
-            output += " "
+            // output += .codegen_type(var.type_id)
+            // output += " "
             output += var.name
             output += " = "
             output += .codegen_expression(init)
