@@ -167,6 +167,18 @@ struct JavascriptCodeGenerator {
     }
 
     function codegen_expression(mut this, anon expression: CheckedExpression) throws -> String => match expression {
+        JaktArray(vals, type_id) => {
+            mut output = "["
+
+            for value in vals.iterator() {
+                output += .codegen_expression(value)
+                output += ", "
+            }
+
+            output += "]"
+
+            return output
+        }
         // Range(from, to, type_id) => {
         //     mut output = ""
         //     let type = .program.get_type(type_id)
