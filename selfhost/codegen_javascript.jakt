@@ -167,132 +167,132 @@ struct JavascriptCodeGenerator {
     }
 
     function codegen_expression(mut this, anon expression: CheckedExpression) throws -> String => match expression {
-        Range(from, to, type_id) => {
-            mut output = ""
-            let type = .program.get_type(type_id)
-            let index_type = match type {
-                GenericInstance(id, args) => args[0]
-                else => {
-                    panic("Internal error: range expression doesn't have Range type")
-                    // FIXME: panic() should be "noreturn" and this can be removed
-                    yield TypeId(module: ModuleId(id: 0), id: 0)
-                }
-            }
-            output += "("
-            output += .codegen_type(type_id)
-            output += "{"
-            output += "static_cast<"
-            output += .codegen_type(index_type)
-            output += ">("
-            output += .codegen_expression(from)
-            output += "),static_cast<"
-            output += .codegen_type(index_type)
-            output += ">("
-            output += .codegen_expression(to)
-            output += ")})"
-            yield output
-        }
-        OptionalNone => "JaktInternal::OptionalNone()"
-        OptionalSome(expr, type_id) => "(" + .codegen_expression(expr) + ")"
-        ForcedUnwrap(expr, type_id) => "(" + .codegen_expression(expr) + ".value())"
-        QuotedString(val) => "String(\"" + val + "\")"
-        ByteConstant(val) => "'" + val + "'"
-        CharacterConstant(val) => "'" + val + "'"
-        Var(var) => var.name
-        IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
-        IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
-        IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
-        IndexedStruct(expr, index) => {
-            mut output = ""
-            output += "(("
-            output += .codegen_expression(expression: expr)
-            output += ")"
+        // Range(from, to, type_id) => {
+        //     mut output = ""
+        //     let type = .program.get_type(type_id)
+        //     let index_type = match type {
+        //         GenericInstance(id, args) => args[0]
+        //         else => {
+        //             panic("Internal error: range expression doesn't have Range type")
+        //             // FIXME: panic() should be "noreturn" and this can be removed
+        //             yield TypeId(module: ModuleId(id: 0), id: 0)
+        //         }
+        //     }
+        //     output += "("
+        //     output += .codegen_type(type_id)
+        //     output += "{"
+        //     output += "static_cast<"
+        //     output += .codegen_type(index_type)
+        //     output += ">("
+        //     output += .codegen_expression(from)
+        //     output += "),static_cast<"
+        //     output += .codegen_type(index_type)
+        //     output += ">("
+        //     output += .codegen_expression(to)
+        //     output += ")})"
+        //     yield output
+        // }
+        // OptionalNone => "JaktInternal::OptionalNone()"
+        // OptionalSome(expr, type_id) => "(" + .codegen_expression(expr) + ")"
+        // ForcedUnwrap(expr, type_id) => "(" + .codegen_expression(expr) + ".value())"
+        QuotedString(val) => "\"" + val + "\""
+        // ByteConstant(val) => "'" + val + "'"
+        // CharacterConstant(val) => "'" + val + "'"
+        // Var(var) => var.name
+        // IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
+        // IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
+        // IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
+        // IndexedStruct(expr, index) => {
+        //     mut output = ""
+        //     output += "(("
+        //     output += .codegen_expression(expression: expr)
+        //     output += ")"
 
-            let is_this = match expr {
-                Var(var) => var.name == "this"
-                else => false
-            }
+        //     let is_this = match expr {
+        //         Var(var) => var.name == "this"
+        //         else => false
+        //     }
 
-            if is_this {
-                output += "->"
-            } else {
-                match .program.get_type(expression_type(expr)) {
-                    RawPtr => {
-                        output += "->"
-                    }
-                    Struct(struct_id) => {
-                        let structure = .program.get_struct(struct_id)
-                        if structure.record_type is Class {
-                            output += "->"
-                        } else {
-                            output += "."
-                        }
-                    }
-                    else => {
-                        output += "."
-                    }
-                }
-            }
-            output += index
-            output += ")"
-            yield output
-        }
+        //     if is_this {
+        //         output += "->"
+        //     } else {
+        //         match .program.get_type(expression_type(expr)) {
+        //             RawPtr => {
+        //                 output += "->"
+        //             }
+        //             Struct(struct_id) => {
+        //                 let structure = .program.get_struct(struct_id)
+        //                 if structure.record_type is Class {
+        //                     output += "->"
+        //                 } else {
+        //                     output += "."
+        //                 }
+        //             }
+        //             else => {
+        //                 output += "."
+        //             }
+        //         }
+        //     }
+        //     output += index
+        //     output += ")"
+        //     yield output
+        // }
         Block(block) => .codegen_block(block)
         Call(call) => .codegen_call(call)
         Boolean(val) => match val {
             true => "true"
             else => "false"
         }
-        UnaryOp(expr, op, type_id) => {
-            mut output = "("
-            output += match op {
-                PreIncrement => "++"
-                PreDecrement => "--"
-                Negate => "-"
-                Dereference => "*"
-                RawAddress => "&"
-                LogicalNot => "!"
-                BitwiseNot => "~"
-                Is => {
-                    todo("codegen Is")
-                    yield ""
-                }
-                TypeCast(cast) => {
-                    let is_integer = .program.is_integer(cast.type_id())
-                    yield match cast {
-                        Fallible => {
-                            mut cast_type = "dynamic_cast"
-                            if is_integer {
-                                cast_type = "fallible_integer_cast"
-                            }
-                            yield cast_type
-                        }
-                        Infallible => {
-                            mut cast_type = "verify_cast"
-                            if is_integer {
-                                cast_type = "infallible_integer_cast"
-                            }
-                            yield cast_type
-                        }
-                    } + "<" + .codegen_type(cast.type_id()) + ">("
-                }
-                else => ""
-            }
-            output += .codegen_expression(expr)
-            output += match op {
-                PostIncrement => "++"
-                PostDecrement => "--"
-                TypeCast | Is => ")"
-                IsEnumVariant => {
-                    todo("codegen IsEnumVariant")
-                    yield ""
-                }
-                else => ""
-            }
-            output += ")"
-            yield output
-        }
-        BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
+        // UnaryOp(expr, op, type_id) => {
+        //     mut output = "("
+        //     output += match op {
+        //         PreIncrement => "++"
+        //         PreDecrement => "--"
+        //         Negate => "-"
+        //         Dereference => "*"
+        //         RawAddress => "&"
+        //         LogicalNot => "!"
+        //         BitwiseNot => "~"
+        //         Is => {
+        //             todo("codegen Is")
+        //             yield ""
+        //         }
+        //         TypeCast(cast) => {
+        //             let is_integer = .program.is_integer(cast.type_id())
+        //             yield match cast {
+        //                 Fallible => {
+        //                     mut cast_type = "dynamic_cast"
+        //                     if is_integer {
+        //                         cast_type = "fallible_integer_cast"
+        //                     }
+        //                     yield cast_type
+        //                 }
+        //                 Infallible => {
+        //                     mut cast_type = "verify_cast"
+        //                     if is_integer {
+        //                         cast_type = "infallible_integer_cast"
+        //                     }
+        //                     yield cast_type
+        //                 }
+        //             } + "<" + .codegen_type(cast.type_id()) + ">("
+        //         }
+        //         else => ""
+        //     }
+        //     output += .codegen_expression(expr)
+        //     output += match op {
+        //         PostIncrement => "++"
+        //         PostDecrement => "--"
+        //         TypeCast | Is => ")"
+        //         IsEnumVariant => {
+        //             todo("codegen IsEnumVariant")
+        //             yield ""
+        //         }
+        //         else => ""
+        //     }
+        //     output += ")"
+        //     yield output
+        // }
+        // BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
         NumericConstant(val, type_id) => {
             let type_name = match val {
                 USize => "size_t"
@@ -481,9 +481,9 @@ struct JavascriptCodeGenerator {
         match call.name {
             "print" | "println" | "eprintln" | "format" => {
                 let helper = match call.name {
-                    "print" => "out"
-                    "println" => "outln"
-                    "eprintln" => "warnln"
+                    "print" => "console.log"
+                    "println" => "console.log"
+                    "eprintln" => "console.warn"
                     "format" => "String::formatted"
                     else => ""
                 }
