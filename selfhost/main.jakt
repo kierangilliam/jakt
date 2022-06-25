@@ -7,6 +7,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 import codegen { CodeGenerator }
+import codegen_javascript { JavascriptCodeGenerator }
 import error { JaktError, print_error }
 import lexer { Lexer }
 import parser { Parser }
@@ -29,6 +30,7 @@ function main(args: [String]) {
         return 0
     }
 
+    let codegen_javascript = flag(args, "js")
     let lexer_debug = flag(args, "l")
     let parser_debug = flag(args, "p")
     let build_executable = flag(args, "b")
@@ -41,7 +43,7 @@ function main(args: [String]) {
             first_arg = false
             continue
         }
-        if arg != "-h" and arg != "-l" and arg != "-p" and arg != "-b" {
+        if arg != "-js" and arg != "-h" and arg != "-l" and arg != "-p" and arg != "-b" {
             if file_name.has_value() {
                 eprintln("you can only pass one file")
                 eprintln("{}", usage())
@@ -84,6 +86,12 @@ function main(args: [String]) {
 
     if not errors.is_empty() {
         return 1
+    }
+
+    if codegen_javascript {
+        let output = JavascriptCodeGenerator::generate(checked_program)
+        println("{}", output) 
+        return 0
     }
 
     let output = CodeGenerator::generate(checked_program)
