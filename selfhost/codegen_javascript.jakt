@@ -100,6 +100,12 @@ struct JavascriptCodeGenerator {
         mut output = ""
 
         output += "const __jakt_internal_i64 = v => Math.floor(v);\n"
+        // FIXME: Should follow the same conventions as CPP's JaktInternal
+        output += "__jakt_internal_checked_add = (type, a, b) => a + b;\n"
+        output += "__jakt_internal_checked_sub = (type, a, b) => a - b;\n"
+        output += "__jakt_internal_checked_mul = (type, a, b) => a * b;\n"
+        output += "__jakt_internal_checked_div = (type, a, b) => a / b;\n"
+        output += "__jakt_internal_checked_mod = (type, a, b) => a % b;\n"
 
         for module in generator.program.modules.iterator() {
 
@@ -379,7 +385,6 @@ struct JavascriptCodeGenerator {
             // Integer arithmetic is checked by default.
             match op {
                 Add | Subtract | Multiply | Divide | Modulo => {
-                    todo("Add | Subtract | Multiply | Divide | Modulo")
                     return "(" + .codegen_checked_binary_op(lhs, rhs, op, type_id) + ")"
                 }
                 AddAssign | SubtractAssign | MultiplyAssign | DivideAssign | ModuloAssign => {
@@ -437,7 +442,7 @@ struct JavascriptCodeGenerator {
 
     function codegen_checked_binary_op(mut this, lhs: CheckedExpression, rhs: CheckedExpression, op: BinaryOperator, type_id: TypeId) throws -> String {
         mut output = ""
-        output += "JaktInternal::"
+        output += .internal_prefix
 
         output += match op {
             Add => "checked_add"
@@ -451,9 +456,9 @@ struct JavascriptCodeGenerator {
             }
         }
 
-        output += "<"
-        output += .codegen_type(type_id)
-        output += ">("
+        output += "("
+        output += format("'{}'", .codegen_type(type_id))
+        output += ","
         output += .codegen_expression(lhs)
         output += ","
         output += .codegen_expression(rhs)
@@ -893,11 +898,11 @@ struct JavascriptCodeGenerator {
             } else {
                 first = false
             }
-            if not variable.is_mutable {
-                output += "const "
-            }
-            output += .codegen_type(variable.type_id)
-            output += " "
+            // if not variable.is_mutable {
+            //     output += "const "
+            // }
+            // output += .codegen_type(variable.type_id)
+            // output += " "
             output += variable.name
         }
 
