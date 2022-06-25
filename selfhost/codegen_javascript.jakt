@@ -99,7 +99,7 @@ struct JavascriptCodeGenerator {
 
         mut output = ""
 
-        output += "const __jakt_internal_i64 = v => v;\n"
+        output += "const __jakt_internal_i64 = v => Math.floor(v);\n"
 
         for module in generator.program.modules.iterator() {
 
@@ -211,7 +211,7 @@ struct JavascriptCodeGenerator {
         // ByteConstant(val) => "'" + val + "'"
         // CharacterConstant(val) => "'" + val + "'"
         Var(var) => var.name
-        // IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
+        IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
         // IndexedStruct(expr, index) => {
@@ -255,56 +255,57 @@ struct JavascriptCodeGenerator {
             true => "true"
             else => "false"
         }
-        // UnaryOp(expr, op, type_id) => {
-        //     mut output = "("
-        //     output += match op {
-        //         PreIncrement => "++"
-        //         PreDecrement => "--"
-        //         Negate => "-"
-        //         Dereference => "*"
-        //         RawAddress => "&"
-        //         LogicalNot => "!"
-        //         BitwiseNot => "~"
-        //         Is => {
-        //             todo("codegen Is")
-        //             yield ""
-        //         }
-        //         TypeCast(cast) => {
-        //             let is_integer = .program.is_integer(cast.type_id())
-        //             yield match cast {
-        //                 Fallible => {
-        //                     mut cast_type = "dynamic_cast"
-        //                     if is_integer {
-        //                         cast_type = "fallible_integer_cast"
-        //                     }
-        //                     yield cast_type
-        //                 }
-        //                 Infallible => {
-        //                     mut cast_type = "verify_cast"
-        //                     if is_integer {
-        //                         cast_type = "infallible_integer_cast"
-        //                     }
-        //                     yield cast_type
-        //                 }
-        //             } + "<" + .codegen_type(cast.type_id()) + ">("
-        //         }
-        //         else => ""
-        //     }
-        //     output += .codegen_expression(expr)
-        //     output += match op {
-        //         PostIncrement => "++"
-        //         PostDecrement => "--"
-        //         TypeCast | Is => ")"
-        //         IsEnumVariant => {
-        //             todo("codegen IsEnumVariant")
-        //             yield ""
-        //         }
-        //         else => ""
-        //     }
-        //     output += ")"
-        //     yield output
-        // }
-        // BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
+        UnaryOp(expr, op, type_id) => {
+            mut output = "("
+            output += match op {
+                PreIncrement => "++"
+                PreDecrement => "--"
+                Negate => "-"
+                Dereference => "*"
+                RawAddress => "&"
+                LogicalNot => "!"
+                BitwiseNot => "~"
+                Is => {
+                    todo("codegen Is")
+                    yield ""
+                }
+                TypeCast(cast) => {
+                    todo("codegen TypeCast")
+                    let is_integer = .program.is_integer(cast.type_id())
+                    yield match cast {
+                        Fallible => {
+                            mut cast_type = "dynamic_cast"
+                            if is_integer {
+                                cast_type = "fallible_integer_cast"
+                            }
+                            yield cast_type
+                        }
+                        Infallible => {
+                            mut cast_type = "verify_cast"
+                            if is_integer {
+                                cast_type = "infallible_integer_cast"
+                            }
+                            yield cast_type
+                        }
+                    } + "<" + .codegen_type(cast.type_id()) + ">("
+                }
+                else => ""
+            }
+            output += .codegen_expression(expr)
+            output += match op {
+                PostIncrement => "++"
+                PostDecrement => "--"
+                TypeCast | Is => ")"
+                IsEnumVariant => {
+                    todo("codegen IsEnumVariant")
+                    yield ""
+                }
+                else => ""
+            }
+            output += ")"
+            yield output
+        }
+        BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
         NumericConstant(val, type_id) => {
             let type_name = match val {
                 USize => "size_t"
@@ -339,45 +340,50 @@ struct JavascriptCodeGenerator {
         }
 
         if op is NoneCoalescingAssign {
-            mut output = .codegen_expression(lhs)
-            output += ".lazy_emplace([&] { return "
-            output += .codegen_expression(rhs)
-            output += "; })"
-            return output
+            // mut output = .codegen_expression(lhs)
+            // output += ".lazy_emplace([&] { return "
+            // output += .codegen_expression(rhs)
+            // output += "; })"
+            // return output
+            todo("NoneCoalescingAssign")
         }
 
         if op is ArithmeticRightShift {
-            mut output = "JaktInternal::arithmetic_shift_right("
-            output += .codegen_expression(lhs)
-            output += ","
-            output += .codegen_expression(rhs)
-            output += ")"
-            return output
+            // mut output = "JaktInternal::arithmetic_shift_right("
+            // output += .codegen_expression(lhs)
+            // output += ","
+            // output += .codegen_expression(rhs)
+            // output += ")"
+            // return output
+            todo("ArithmeticRightShift")
         }
 
         if op is Assign and lhs is IndexedDictionary {
-            match lhs {
-                IndexedDictionary(expr, index) => {
-                    mut output = .codegen_expression(expr)
-                    output += ".set("
-                    output += .codegen_expression(index)
-                    output += ", "
-                    output += .codegen_expression(rhs)
-                    output += "))"
-                }
-                else => {
-                    // FIXME: unreachable
-                }
-            }
+            todo("IndexedDictionary")
+            // match lhs {
+            //     IndexedDictionary(expr, index) => {
+            //         mut output = .codegen_expression(expr)
+            //         output += ".set("
+            //         output += .codegen_expression(index)
+            //         output += ", "
+            //         output += .codegen_expression(rhs)
+            //         output += "))"
+            //     }
+            //     else => {
+            //         // FIXME: unreachable
+            //     }
+            // }
         }
 
         if .program.is_integer(type_id) {
             // Integer arithmetic is checked by default.
             match op {
                 Add | Subtract | Multiply | Divide | Modulo => {
+                    todo("Add | Subtract | Multiply | Divide | Modulo")
                     return "(" + .codegen_checked_binary_op(lhs, rhs, op, type_id) + ")"
                 }
                 AddAssign | SubtractAssign | MultiplyAssign | DivideAssign | ModuloAssign => {
+                    todo("AddAssign | SubtractAssign | MultiplyAssign | DivideAssign | ModuloAssign")
                     return "(" + .codegen_checked_binary_op_assignment(lhs, rhs, op, type_id) + ")"
                 }
                 else => { }
@@ -636,20 +642,20 @@ struct JavascriptCodeGenerator {
         //     output += "}"
         //     yield output
         // }
-        // While(condition, block) => {
-        //     mut output = ""
-        //     output += "while ("
-        //     output += .codegen_expression(expression: condition)
-        //     output += ") "
-        //     {
-        //         let last_control_flow = .control_flow_state
-        //         .control_flow_state = last_control_flow.enter_loop()
-        //         let code = .codegen_block(block)
-        //         .control_flow_state = last_control_flow
-        //         output += code
-        //     }
-        //     yield output
-        // }
+        While(condition, block) => {
+            mut output = ""
+            output += "while ("
+            output += .codegen_expression(expression: condition)
+            output += ") "
+            {
+                let last_control_flow = .control_flow_state
+                .control_flow_state = last_control_flow.enter_loop()
+                let code = .codegen_block(block)
+                .control_flow_state = last_control_flow
+                output += code
+            }
+            yield output
+        }
         Block(block) => .codegen_block(block)
         Garbage => {
             panic("Garbage statement in codegen")
