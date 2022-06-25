@@ -82,6 +82,7 @@ struct JavascriptCodeGenerator {
 
     program: CheckedProgram
     control_flow_state: ControlFlowState
+    internal_prefix: String
     entered_yieldable_blocks: [(String, String)] // label, variable name
 
     function generate(anon program: CheckedProgram) throws -> String {
@@ -92,13 +93,13 @@ struct JavascriptCodeGenerator {
                 passes_through_match: false
                 match_nest_level: 0
             )
+            internal_prefix: "__jakt_internal_"
             entered_yieldable_blocks: []
         )
 
         mut output = ""
 
-        output += "#include <lib.h>\n"
-        output += "namespace Jakt {\n"
+        output += "const __jakt_internal_i64 = v => v;\n"
 
         for module in generator.program.modules.iterator() {
 
@@ -112,7 +113,7 @@ struct JavascriptCodeGenerator {
             }
         }
 
-        output += "}\n"
+        output += "console.log('Main: ', main())\n"
 
         return output
     }
@@ -293,12 +294,6 @@ struct JavascriptCodeGenerator {
         }
         BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
         NumericConstant(val, type_id) => {
-            let suffix = match val {
-                I64 => "LL"
-                U64 | USize => "ULL"
-                else => ""
-            }
-
             let type_name = match val {
                 USize => "size_t"
                 else => .codegen_type(type_id)
@@ -316,7 +311,7 @@ struct JavascriptCodeGenerator {
                 | U32(val)
                 | U64(val)
                 | USize(val)
-                => format("static_cast<{}>({}{})", type_name, val, suffix)
+                => format("{}{}({})", .internal_prefix, type_name, val)
             }
         }
         else => {
@@ -831,21 +826,21 @@ struct JavascriptCodeGenerator {
     }
 
     function codegen_function_in_namespace(mut this, function_: CheckedFunction, containing_struct: TypeId?) throws -> String {
-        mut output = ""
+        mut output = "function"
 
         let is_main = function_.name == "main" and not containing_struct.has_value()
 
-        if is_main {
-            output += "ErrorOr<int>"
-        } else {
-            if function_.is_static() and not containing_struct.has_value() {
-                output += "static "
-            }
-            output += match function_.can_throw {
-                true => format("ErrorOr<{}>", .codegen_type(function_.return_type_id))
-                else => .codegen_type(function_.return_type_id)
-            }
-        }
+        // if is_main {
+        //     output += "ErrorOr<int>"
+        // } else {
+        //     if function_.is_static() and not containing_struct.has_value() {
+        //         output += "static "
+        //     }
+        //     output += match function_.can_throw {
+        //         true => format("ErrorOr<{}>", .codegen_type(function_.return_type_id))
+        //         else => .codegen_type(function_.return_type_id)
+        //     }
+        // }
 
         output += " "
 
@@ -866,7 +861,7 @@ struct JavascriptCodeGenerator {
         output += "("
 
         if is_main and function_.params.is_empty() {
-            output += "Array<String>"
+            output += "...args"
         }
 
         mut first = true
@@ -890,9 +885,9 @@ struct JavascriptCodeGenerator {
 
         output += ")"
 
-        if not function_.is_static() and not function_.is_mutating() {
-            output += " const"
-        }
+        // if not function_.is_static() and not function_.is_mutating() {
+        //     output += " const"
+        // }
 
         output += "{"
 
