@@ -101,11 +101,32 @@ struct JavascriptCodeGenerator {
 
         output += "const __jakt_internal_i64 = v => Math.floor(v);\n"
         // FIXME: Should follow the same conventions as CPP's JaktInternal
-        output += "__jakt_internal_checked_add = (type, a, b) => a + b;\n"
-        output += "__jakt_internal_checked_sub = (type, a, b) => a - b;\n"
-        output += "__jakt_internal_checked_mul = (type, a, b) => a * b;\n"
-        output += "__jakt_internal_checked_div = (type, a, b) => a / b;\n"
-        output += "__jakt_internal_checked_mod = (type, a, b) => a % b;\n"
+        output += "const __jakt_internal_checked_add = (type, a, b) => a + b;\n"
+        output += "const __jakt_internal_checked_sub = (type, a, b) => a - b;\n"
+        output += "const __jakt_internal_checked_mul = (type, a, b) => a * b;\n"
+        output += "const __jakt_internal_checked_div = (type, a, b) => a / b;\n"
+        output += "const __jakt_internal_checked_mod = (type, a, b) => a % b;\n"
+
+        output += "const TRY = (fn) => {\n"
+        output += "   return () => {\n"
+        output += "       try {\n"
+        output += "           return fn()\n"
+        output += "       }\n"
+        output += "       catch (error) {\n"
+        output += "           console.error('TRY failed')\n"
+        output += "           console.error(error)\n"
+        output += "           throw new Error(error)\n"
+        output += "       }\n"
+        output += "    }\n"
+        output += "}\n"
+
+        output += "const __jakt_internal_format = (input, ...args) => {\n"
+        output += "let output = input\n"
+        output += "args.forEach(arg => {\n"
+        output += "    output = output.replace('{}', arg)\n"
+        output += "})\n"
+        output += "return output\n"
+        output += "}\n"
 
         for module in generator.program.modules.iterator() {
 
@@ -499,15 +520,17 @@ struct JavascriptCodeGenerator {
         mut output = ""
 
         if call.callee_throws {
-            output += "TRY("
+            output += "TRY(() =>"
         }
         match call.name {
             "print" | "println" | "eprintln" | "format" => {
+                let fmt = format("{}format", .internal_prefix)
+
                 let helper = match call.name {
-                    "print" => "console.log"
-                    "println" => "console.log"
-                    "eprintln" => "console.warn"
-                    "format" => "String::formatted"
+                    "print" => format("console.log({}", fmt)
+                    "println" => format("console.log({}", fmt)
+                    "eprintln" => format("console.warn({}", fmt)
+                    "format" => fmt
                     else => ""
                 }
                 output += helper
@@ -518,6 +541,12 @@ struct JavascriptCodeGenerator {
                     if i != call.args.size() - 1 {
                         output += ","
                     }
+                }
+                output += match call.name {
+                    "print" => ")"
+                    "println" => ")"
+                    "eprintln" => ")"
+                    else => ""
                 }
                 output += ")"
             }
@@ -550,7 +579,7 @@ struct JavascriptCodeGenerator {
         }
 
         if call.callee_throws {
-            output += ")"
+            output += ")()"
         }
 
         return output
