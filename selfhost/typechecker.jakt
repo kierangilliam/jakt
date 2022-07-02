@@ -3617,6 +3617,8 @@ struct Typechecker {
             resolved_namespaces.push(ResolvedNamespace(name, generic_parameters))
         }
 
+        mut function_id: FunctionId? = None
+
         match call.name {
             "print" | "println" | "eprintln" | "format" => {
                 for arg in call.args.iterator() {
@@ -3638,8 +3640,8 @@ struct Typechecker {
                     return CheckedExpression::Call(call: CheckedCall(namespace_: [], name: call.name, args, function_id: none_function_id, return_type, callee_throws), span, type_id: return_type)
                 }
 
-                let function_id = maybe_function_id!
-                let callee = .get_function(function_id)
+                function_id = maybe_function_id
+                let callee = .get_function(function_id!)
                 callee_throws = callee.can_throw
                 return_type = callee.return_type_id
 
@@ -3668,8 +3670,7 @@ struct Typechecker {
             }
         }
 
-        let none_function_id: FunctionId? = None
-        return CheckedExpression::Call(call: CheckedCall(namespace_: [], name: call.name, args, function_id: none_function_id, return_type, callee_throws), span, type_id: return_type)
+        return CheckedExpression::Call(call: CheckedCall(namespace_: [], name: call.name, args, function_id, return_type, callee_throws), span, type_id: return_type)
     }
 
     function resolve_type_var(this, type_var_type_id: TypeId, scope_id: ScopeId) -> TypeId {
