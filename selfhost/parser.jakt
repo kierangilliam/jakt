@@ -75,6 +75,7 @@ enum FunctionType {
 struct ParsedFunction {
     name: String
     name_span: Span
+    visibility: Visibility
     params: [ParsedParameter]
     generic_parameters: [ParsedGenericParameter]
     block: ParsedBlock
@@ -111,26 +112,65 @@ struct ParsedBlock {
         }
         return None
     }
+
+    function span(this) throws -> Span? {
+        mut start: usize? = None
+        mut end: usize = 0
+
+        for stmt in .stmts.iterator() {
+            let stmt_span = stmt.span()
+            if not start.has_value() {
+                start = stmt_span.start
+            }
+            end = stmt_span.end
+        }
+
+        if start.has_value() {
+            return Span(start: start!, end)
+        }
+
+        return None
+    }
 }
 
 boxed enum ParsedStatement {
-    Expression(ParsedExpression)
+    Expression(expr: ParsedExpression, span: Span)
     Defer(statement: ParsedStatement, span: Span)
-    UnsafeBlock(ParsedBlock)
-    VarDecl(var: ParsedVarDecl, init: ParsedExpression)
-    If(condition: ParsedExpression, then_block: ParsedBlock, else_statement: ParsedStatement?)
-    Block(ParsedBlock)
-    Loop(ParsedBlock)
-    While(condition: ParsedExpression, block: ParsedBlock)
-    For(iterator_name: String, name_span: Span, range: ParsedExpression, block: ParsedBlock)
-    Break
-    Continue
+    UnsafeBlock(block: ParsedBlock, span: Span)
+    VarDecl(var: ParsedVarDecl, init: ParsedExpression, span: Span)
+    If(condition: ParsedExpression, then_block: ParsedBlock, else_statement: ParsedStatement?, span: Span)
+    Block(block: ParsedBlock, span: Span)
+    Loop(block: ParsedBlock, span: Span)
+    While(condition: ParsedExpression, block: ParsedBlock, span: Span)
+    For(iterator_name: String, name_span: Span, range: ParsedExpression, block: ParsedBlock, span: Span)
+    Break(Span)
+    Continue(Span)
     Return(expr: ParsedExpression?, span: Span)
-    Throw(ParsedExpression)
-    Yield(ParsedExpression)
+    Throw(expr: ParsedExpression, span: Span)
+    Yield(expr: ParsedExpression, span: Span)
     InlineCpp(block: ParsedBlock, span: Span)
-    Try(stmt: ParsedStatement, error_name: String, error_span: Span, catch_block: ParsedBlock)
-    Garbage
+    Try(stmt: ParsedStatement, error_name: String, error_span: Span, catch_block: ParsedBlock, span: Span)
+    Garbage(Span)
+
+    function span(this) -> Span => match this {
+        Expression(span) => span
+        Defer(span) => span
+        UnsafeBlock(span) => span
+        VarDecl(span) => span
+        If(span) => span
+        Block(span) => span
+        Loop(span) => span
+        While(span) => span
+        For(span) => span
+        Break(span) => span
+        Continue(span) => span
+        Return(span) => span
+        Throw(span) => span
+        Yield(span) => span
+        InlineCpp(span) => span
+        Try(span) => span
+        Garbage(span) => span
+    }
 }
 
 enum BinaryOperator {
@@ -455,7 +495,7 @@ struct Parser {
                     parsed_namespace.imports.push(.parse_import())
                 }
                 Function => {
-                    let parsed_function = .parse_function(FunctionLinkage::Internal)
+                    let parsed_function = .parse_function(FunctionLinkage::Internal, Visibility::Public)
                     parsed_namespace.functions.push(parsed_function)
                 }
                 Struct | Class | Enum | Boxed => {
@@ -496,7 +536,7 @@ struct Parser {
                     .index++
                     match .current() {
                         Function => {
-                            let parsed_function = .parse_function(FunctionLinkage::External)
+                            let parsed_function = .parse_function(FunctionLinkage::External, Visibility::Public)
                             parsed_namespace.functions.push(parsed_function)
                         }
                         Struct => {
@@ -520,7 +560,7 @@ struct Parser {
                     break
                 }
                 else => {
-                    .error("Unrecognized token in namespace (probably not implemented yet)", .current().span())
+                    .error("Unexpected token (expected keyword)", .current().span())
                     break
                 }
             }
@@ -850,7 +890,7 @@ struct Parser {
         if .current() is Enum {
             .index++
         } else {
-            .error("expected `enum` keyword", .current().span())
+            .error("Expected `enum` keyword", .current().span())
             return parsed_enum
         }
 
@@ -917,7 +957,7 @@ struct Parser {
         return parsed_enum
     }
 
-    public function parse_struct_class_body(mut this, definition_linkage: DefinitionLinkage, default_visibility: Visibility) throws -> ([ParsedField],[ParsedMethod]) {
+    public function parse_struct_class_body(mut this, definition_linkage: DefinitionLinkage, default_visibility: Visibility, is_class: bool) throws -> ([ParsedField],[ParsedMethod]) {
         if .current() is LCurly {
             .index++
         } else {
@@ -1008,7 +1048,11 @@ struct Parser {
                 }
             }
         }
-        .error("Incomplete class body, expected '}'", .current().span())
+        if is_class {
+            .error("Incomplete class body, expected ‘}’", .current().span())
+        } else {
+            .error("Incomplete struct body, expected ‘}’", .current().span())
+        }
         return (fields, methods)
     }
 
@@ -1024,7 +1068,7 @@ struct Parser {
         if .current() is Struct {
             .index++
         } else {
-            .error("expected `struct` keyword", .current().span())
+            .error("Expected `struct` keyword", .current().span())
             return parsed_struct
         }
         // Struct name
@@ -1057,7 +1101,7 @@ struct Parser {
             return parsed_struct
         }
 
-        let fields_methods = .parse_struct_class_body(definition_linkage, default_visibility: Visibility::Public)
+        let fields_methods = .parse_struct_class_body(definition_linkage, default_visibility: Visibility::Public, is_class: false)
 
         parsed_struct.methods = fields_methods.1
         parsed_struct.record_type = RecordType::Struct(fields: fields_methods.0)
@@ -1078,7 +1122,7 @@ struct Parser {
         if .current() is Class {
             .index++
         } else {
-            .error("expected `class` keyword", .current().span())
+            .error("Expected `class` keyword", .current().span())
             return parsed_class
         }
         // Class name
@@ -1123,7 +1167,7 @@ struct Parser {
             return parsed_class
         }
 
-        let fields_methods = .parse_struct_class_body(definition_linkage, default_visibility: Visibility::Private)
+        let fields_methods = .parse_struct_class_body(definition_linkage, default_visibility: Visibility::Private, is_class: true)
 
         parsed_class.methods = fields_methods.1
         parsed_class.record_type = RecordType::Class(fields: fields_methods.0, super_class)
@@ -1131,10 +1175,11 @@ struct Parser {
         return parsed_class
     }
 
-    public function parse_function(mut this, anon linkage: FunctionLinkage) throws -> ParsedFunction {
+    public function parse_function(mut this, anon linkage: FunctionLinkage, anon visibility: Visibility) throws -> ParsedFunction {
         mut parsed_function = ParsedFunction(
             name: "",
             name_span: empty_span(),
+            visibility,
             params: [],
             generic_parameters: [],
             block: ParsedBlock(stmts: []),
@@ -1269,12 +1314,12 @@ struct Parser {
         parsed_function.params = params
 
         // NOTE: main() always throws
-        if function_name == "main" {
-            parsed_function.can_throw = true
-        } else if .current() is Throws {
-            parsed_function.can_throw = true
+        mut can_throw = function_name == "main"
+        if .current() is Throws {
+            can_throw = true
             .index++
         }
+        parsed_function.can_throw = can_throw
 
         if .current() is Arrow {
             .index++
@@ -1318,7 +1363,7 @@ struct Parser {
     }
 
     function parse_method(mut this, anon linkage: FunctionLinkage, anon visibility: Visibility) throws -> ParsedMethod {
-        mut parsed_function = .parse_function(linkage)
+        mut parsed_function = .parse_function(linkage, visibility)
 
         if linkage is External {
             parsed_function.must_instantiate = true
@@ -1495,7 +1540,7 @@ struct Parser {
             if index_before == index_after {
                 break
             }
-            types.push(.parse_typename())
+            types.push(type)
         }
         .error("Expected ‘)’", .current().span())
         return ParsedType::Empty
@@ -1552,29 +1597,32 @@ struct Parser {
             }
             Unsafe => {
                 .index++
-                yield ParsedStatement::UnsafeBlock(.parse_block())
+                let block = .parse_block()
+                yield ParsedStatement::UnsafeBlock(block, span: merge_spans(start, .previous().span()))
             }
             Break => {
                 .index++
-                yield ParsedStatement::Break
+                yield ParsedStatement::Break(start)
             }
             Continue => {
                 .index++
-                yield ParsedStatement::Continue
+                yield ParsedStatement::Continue(start)
             }
             Loop => {
                 .index++
-                yield ParsedStatement::Loop(.parse_block())
+                let block = .parse_block()
+                yield ParsedStatement::Loop(block, span: merge_spans(start, .previous().span()))
             }
             Throw => {
                 .index++
-                yield ParsedStatement::Throw(.parse_expression(allow_assignments: false))
+                let expr = .parse_expression(allow_assignments: false)
+                yield ParsedStatement::Throw(expr, span: merge_spans(start, .previous().span()))
             }
             While => {
                 .index++
                 let condition = .parse_expression(allow_assignments: false)
                 let block = .parse_block()
-                yield ParsedStatement::While(condition, block)
+                yield ParsedStatement::While(condition, block, span: merge_spans(start, .previous().span()))
             }
             Yield => {
                 .index++
@@ -1582,7 +1630,7 @@ struct Parser {
                 if not inside_block {
                     .error("‘yield’ can only be used inside a block", span: merge_spans(start, end: expr.span()))
                 }
-                yield ParsedStatement::Yield(expr)
+                yield ParsedStatement::Yield(expr, span: merge_spans(start, .previous().span()))
             }
             Return => {
                 .index++
@@ -1608,17 +1656,25 @@ struct Parser {
                     }
                 }
 
-                yield ParsedStatement::VarDecl(var, init)
+                yield ParsedStatement::VarDecl(var, init, span: merge_spans(start, .previous().span()))
             }
             If => .parse_if_statement()
             For => .parse_for_statement()
             Try => .parse_try_statement()
-            LCurly => ParsedStatement::Block(.parse_block())
-            else => ParsedStatement::Expression(.parse_expression(allow_assignments: true))
+            LCurly => {
+                let block = .parse_block()
+                yield ParsedStatement::Block(block, span: merge_spans(start, .previous().span()))
+            }
+            else => {
+                let expr = .parse_expression(allow_assignments: true)
+                yield ParsedStatement::Expression(expr, span: merge_spans(start, .previous().span()))
+            }
         }
     }
 
     function parse_try_statement(mut this) throws -> ParsedStatement {
+        let start_span = .current().span()
+
         .index++
 
         let stmt = .parse_statement(inside_block: false)
@@ -1641,10 +1697,11 @@ struct Parser {
         }
 
         let catch_block = .parse_block()
-        return ParsedStatement::Try(stmt, error_name, error_span, catch_block)
+        return ParsedStatement::Try(stmt, error_name, error_span, catch_block, span: merge_spans(start_span, .previous().span()))
     }
 
     function parse_for_statement(mut this) throws -> ParsedStatement {
+        let start_span = .current().span()
         .index++
 
         return match .current() {
@@ -1656,17 +1713,17 @@ struct Parser {
                     .index++
                 } else {
                     .error("Expected ‘in’", .current().span())
-                    return ParsedStatement::Garbage
+                    return ParsedStatement::Garbage(merge_spans(start_span, .current().span()))
                 }
 
                 let range = .parse_expression(allow_assignments: false)
                 let block = .parse_block();
 
-                yield ParsedStatement::For(iterator_name, name_span, range, block)
+                yield ParsedStatement::For(iterator_name, name_span, range, block, span: merge_spans(start_span, .previous().span()))
             }
             else => {
                 .error("Expected iterator name", .current().span())
-                yield ParsedStatement::Garbage
+                yield ParsedStatement::Garbage(merge_spans(start_span, .current().span()))
             }
         }
     }
@@ -1674,7 +1731,7 @@ struct Parser {
     function parse_if_statement(mut this) throws -> ParsedStatement {
         if not .current() is If {
             .error("Expected ‘if’ statement", .current().span())
-            return ParsedStatement::Garbage
+            return ParsedStatement::Garbage(span: .current().span())
         }
 
         let start_span = .current().span()
@@ -1694,7 +1751,8 @@ struct Parser {
                 }
                 LCurly => {
                     // FIXME: Lint: check that ‘if’ and ‘else’ blocks are not the same.
-                    else_statement = ParsedStatement::Block(.parse_block())
+                    let block = .parse_block()
+                    else_statement = ParsedStatement::Block(block, span: merge_spans(start_span, .previous().span()))
                 }
                 else => {
                     .error("‘else’ missing ‘if’ or block", .previous().span())
@@ -1702,7 +1760,7 @@ struct Parser {
             }
         }
 
-        return ParsedStatement::If(condition, then_block, else_statement)
+        return ParsedStatement::If(condition, then_block, else_statement, span: merge_spans(start_span, .previous().span()))
     }
 
     function parse_expression(mut this, allow_assignments: bool) throws -> ParsedExpression {
@@ -2456,7 +2514,7 @@ struct Parser {
                     }
                 }
                 else => {
-                    .error("expected generic parameter name", .current().span())
+                    .error("Expected generic parameter name", .current().span())
                     return generic_parameters
                 }
             }
@@ -2465,7 +2523,7 @@ struct Parser {
         if .current() is GreaterThan {
             .index++
         } else {
-            .error("expected `>` to end the generic parameters", .current().span())
+            .error("Expected `>` to end the generic parameters", .current().span())
             return generic_parameters
         }
 

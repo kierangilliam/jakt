@@ -553,7 +553,7 @@ fn parse_import(tokens: &[Token], index: &mut usize) -> (ParsedImport, Option<Ja
         }
     } else {
         error = error.or(Some(JaktError::ParserError(
-            "expected name after import keyword".to_string(),
+            "Expected name after import keyword".to_string(),
             tokens[*index - 1].span,
         )));
         ImportName::default()
@@ -574,7 +574,7 @@ fn parse_import(tokens: &[Token], index: &mut usize) -> (ParsedImport, Option<Ja
                         }
                         _ => {
                             error = error.or(Some(JaktError::ParserError(
-                                "expected name".to_string(),
+                                "Expected name".to_string(),
                                 tokens[*index].span,
                             )));
                             *index += 1;
@@ -582,7 +582,7 @@ fn parse_import(tokens: &[Token], index: &mut usize) -> (ParsedImport, Option<Ja
                     }
                 } else {
                     error = error.or(Some(JaktError::ParserError(
-                        "expected token".to_string(),
+                        "Expected token".to_string(),
                         tokens[*index - 1].span,
                     )));
                 }
@@ -686,7 +686,7 @@ pub fn parse_namespace(
                     }
 
                     error = error.or(Some(JaktError::ParserError(
-                        "expected enum keyword".to_string(),
+                        "Expected enum keyword".to_string(),
                         tokens[*index].span,
                     )));
                 }
@@ -812,7 +812,7 @@ pub fn parse_namespace(
 
                                 *index += 1;
                                 error = error.or(Some(JaktError::ParserError(
-                                    "unexpected token".to_string(),
+                                    "Unexpected token".to_string(),
                                     tokens[*index].span,
                                 )));
                             }
@@ -853,7 +853,7 @@ pub fn parse_namespace(
                 *index += 1;
 
                 error = error.or(Some(JaktError::ParserError(
-                    "unexpected token (expected keyword)".to_string(),
+                    "Unexpected token (expected keyword)".to_string(),
                     *span,
                 )));
             }
@@ -946,7 +946,7 @@ pub fn parse_enum(
             })
         ) {
             error = error.or(Some(JaktError::ParserError(
-                "expected `{` to start the enum body".to_string(),
+                "Expected `{` to start the enum body".to_string(),
                 tokens[*index].span,
             )));
         } else {
@@ -993,7 +993,7 @@ pub fn parse_enum(
             ) {
                 error = error.or(Some(JaktError::ParserError(
                     format!(
-                        "expected variant name or (public/private) 'function', not {:?}",
+                        "Incomplete enum definition, expected variant name or (public/private) 'function', not {:?}",
                         variant_name
                     ),
                     tokens[*index].span,
@@ -1110,7 +1110,7 @@ pub fn parse_enum(
                                 }) | None
                             ) {
                                 error = error.or(Some(JaktError::ParserError(
-                                    "expected `)` to end type in enum variant".to_string(),
+                                    "Expected `)` to end type in enum variant".to_string(),
                                     tokens[*index].span,
                                 )));
                             }
@@ -1245,7 +1245,7 @@ pub fn parse_enum(
                     tokens.get(*index)
                 ));
                 error = error.or(Some(JaktError::ParserError(
-                    "expected comma or newline after enum variant".to_string(),
+                    "Expected comma or newline after enum variant".to_string(),
                     tokens[*index].span,
                 )));
             }
@@ -1253,7 +1253,7 @@ pub fn parse_enum(
 
         if *index >= tokens.len() || matches!(tokens[*index].contents, TokenContents::Eof) {
             error = error.or(Some(JaktError::ParserError(
-                "expected `}` to end the enum body".to_string(),
+                "Expected `}` to end the enum body".to_string(),
                 tokens.last().unwrap().span,
             )));
         } else {
@@ -1261,7 +1261,7 @@ pub fn parse_enum(
         }
     } else {
         error = error.or(Some(JaktError::ParserError(
-            "expected enum name".to_string(),
+            "Expected enum name".to_string(),
             tokens[*index].span,
         )));
     }
@@ -1314,7 +1314,7 @@ pub fn parse_generic_parameters(
                 return (
                     generic_parameters,
                     Some(JaktError::ParserError(
-                        "expected generic parameter name".to_string(),
+                        "Expected generic parameter name".to_string(),
                         tokens[*index].span,
                     )),
                 );
@@ -1332,7 +1332,7 @@ pub fn parse_generic_parameters(
         return (
             generic_parameters,
             Some(JaktError::ParserError(
-                "expected `>` to end the generic parameters".to_string(),
+                "Expected `>` to end the generic parameters".to_string(),
                 tokens[*index].span,
             )),
         );
@@ -1351,6 +1351,10 @@ pub fn parse_struct(
 
     let mut error = None;
     let mut generic_parameters = vec![];
+    let definition_type_str = match definition_type {
+        DefinitionType::Class => "class",
+        DefinitionType::Struct => "struct",
+    };
 
     *index += 1;
 
@@ -1383,7 +1387,7 @@ pub fn parse_struct(
                             trace!("ERROR: expected '{'");
 
                             error = error.or(Some(JaktError::ParserError(
-                                "expected '{'".to_string(),
+                                "Expected '{'".to_string(),
                                 tokens[*index].span,
                             )));
                             *index += 1;
@@ -1393,7 +1397,7 @@ pub fn parse_struct(
                     trace!("ERROR: incomplete struct");
 
                     error = error.or(Some(JaktError::ParserError(
-                        "incomplete struct".to_string(),
+                        format!("Incomplete {} body, expected ‘}}’", definition_type_str),
                         tokens[*index - 1].span,
                     )));
                 }
@@ -1567,7 +1571,7 @@ pub fn parse_struct(
                             ));
 
                             error = error.or(Some(JaktError::ParserError(
-                                "expected field".to_string(),
+                                "Expected field".to_string(),
                                 tokens[*index].span,
                             )));
                             *index += 1;
@@ -1590,7 +1594,7 @@ pub fn parse_struct(
                     *index -= 1;
 
                     error = error.or(Some(JaktError::ParserError(
-                        "incomplete struct".to_string(),
+                        format!("Incomplete {} body, expected ‘}}’", definition_type_str),
                         tokens[*index - 1].span,
                     )));
                 }
@@ -1615,7 +1619,7 @@ pub fn parse_struct(
                 trace!("ERROR: expected struct name");
 
                 error = error.or(Some(JaktError::ParserError(
-                    "expected struct name".to_string(),
+                    "Expected struct name".to_string(),
                     tokens[*index].span,
                 )));
 
@@ -1638,7 +1642,7 @@ pub fn parse_struct(
         trace!("ERROR: expected struct name");
 
         error = error.or(Some(JaktError::ParserError(
-            "expected struct name".to_string(),
+            "Expected struct name".to_string(),
             tokens[*index].span,
         )));
 
@@ -1699,7 +1703,7 @@ pub fn parse_function(
                             trace!("ERROR: expected '('");
 
                             error = error.or(Some(JaktError::ParserError(
-                                "expected '('".to_string(),
+                                "Expected '('".to_string(),
                                 tokens[*index].span,
                             )));
                         }
@@ -1821,7 +1825,7 @@ pub fn parse_function(
                     *index += 1;
                     if tokens[*index].contents != TokenContents::GreaterThan {
                         error = error.or(Some(JaktError::ParserError(
-                            "expected ->".to_string(),
+                            "Expected ->".to_string(),
                             tokens[*index - 1].span,
                         )));
                     }
@@ -1937,7 +1941,7 @@ pub fn parse_function(
                 (
                     ParsedFunction::new(FunctionLinkage::Internal),
                     Some(JaktError::ParserError(
-                        "expected function name".to_string(),
+                        "Expected function name".to_string(),
                         tokens[*index].span,
                     )),
                 )
@@ -2048,7 +2052,7 @@ pub fn parse_let_or_mut(
         return (
             ParsedStatement::Garbage,
             Some(JaktError::ParserError(
-                "expected initializer".to_string(),
+                "Expected initializer".to_string(),
                 tokens[*index].span,
             )),
         );
@@ -2069,7 +2073,7 @@ pub fn parse_let_or_mut(
                 (
                     ParsedStatement::Garbage,
                     Some(JaktError::ParserError(
-                        "expected initializer".to_string(),
+                        "Expected initializer".to_string(),
                         tokens[*index - 1].span,
                     )),
                 )
@@ -2078,7 +2082,7 @@ pub fn parse_let_or_mut(
         _ => (
             ParsedStatement::Garbage,
             Some(JaktError::ParserError(
-                "expected initializer".to_string(),
+                "Expected initializer".to_string(),
                 tokens[*index].span,
             )),
         ),
@@ -2287,7 +2291,7 @@ pub fn parse_statement(
 
             if inside_block == InsideBlock::No {
                 error = error.or(Some(JaktError::ParserError(
-                    "yield can only be used inside a block".to_string(),
+                    "‘yield’ can only be used inside a block".to_string(),
                     span,
                 )));
             }
@@ -2360,7 +2364,7 @@ fn parse_if_statement(tokens: &[Token], index: &mut usize) -> (ParsedStatement, 
             return (
                 ParsedStatement::Garbage,
                 Some(JaktError::ParserError(
-                    "expected if statement".to_string(),
+                    "Expected if statement".to_string(),
                     tokens[*index].span,
                 )),
             );
@@ -2733,7 +2737,7 @@ pub fn parse_pattern_case(
                                 *index += 1;
                             } else {
                                 error = Some(JaktError::ParserError(
-                                    "expected ':' after explicit pattern argument name".to_string(),
+                                    "Expected ':' after explicit pattern argument name".to_string(),
                                     tokens.get(*index).unwrap().span,
                                 ));
                                 break;
@@ -2749,7 +2753,7 @@ pub fn parse_pattern_case(
                                 arguments.push((Some(name.clone()), binding.clone(), span));
                             } else {
                                 error = Some(JaktError::ParserError(
-                                    "expected pattern argument name".to_string(),
+                                    "Expected pattern argument name".to_string(),
                                     tokens.get(*index).unwrap().span,
                                 ));
                                 break;
@@ -2773,7 +2777,7 @@ pub fn parse_pattern_case(
                                 arguments.push((None, binding.clone(), span));
                             } else {
                                 error = Some(JaktError::ParserError(
-                                    "expected pattern argument name".to_string(),
+                                    "Expected pattern argument name".to_string(),
                                     tokens.get(*index).unwrap().span,
                                 ));
                                 break;
@@ -2797,7 +2801,7 @@ pub fn parse_pattern_case(
                         arguments.push((None, binding.clone(), span));
                     } else {
                         error = Some(JaktError::ParserError(
-                            "expected pattern argument name".to_string(),
+                            "Expected pattern argument name".to_string(),
                             tokens.get(*index).unwrap().span,
                         ));
                         break;
@@ -2857,7 +2861,7 @@ pub fn parse_pattern_case(
         *index += 1;
     } else {
         error = Some(JaktError::ParserError(
-            "expected '=>' after pattern case".to_string(),
+            "Expected '=>' after pattern case".to_string(),
             tokens[*index].span,
         ));
     }
@@ -2897,7 +2901,7 @@ pub fn parse_patterns(tokens: &[Token], index: &mut usize) -> (Vec<MatchCase>, O
     ) {
         skip_newlines(tokens, index);
         error = error.or(Some(JaktError::ParserError(
-            "expected '{'".to_string(),
+            "Expected '{'".to_string(),
             tokens[*index].span,
         )));
         return (cases, error);
@@ -2936,7 +2940,7 @@ pub fn parse_patterns(tokens: &[Token], index: &mut usize) -> (Vec<MatchCase>, O
         })
     ) {
         error = error.or(Some(JaktError::ParserError(
-            "expected '}'".to_string(),
+            "Expected '}'".to_string(),
             tokens[*index].span,
         )));
     }
@@ -3119,7 +3123,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                         trace!("ERROR: expected ')'");
 
                         error = error.or(Some(JaktError::ParserError(
-                            "expected ')'".to_string(),
+                            "Expected ')'".to_string(),
                             tokens[*index].span,
                         )))
                     }
@@ -3137,7 +3141,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                     trace!("ERROR: expected ')'");
 
                     error = error.or(Some(JaktError::ParserError(
-                        "expected ')'".to_string(),
+                        "Expected ')'".to_string(),
                         tokens[*index].span,
                     )))
                 }
@@ -3416,7 +3420,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                     ParsedExpression::Var(name, _) => namespace.push(name.clone()),
                     x => {
                         error = error.or(Some(JaktError::ParserError(
-                            "expected namespace".to_string(),
+                            "Expected namespace".to_string(),
                             x.span(),
                         )));
                     }
@@ -3454,7 +3458,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                                         TokenContents::Name(name) => namespace.push(name.clone()),
                                         _ => {
                                             error = error.or(Some(JaktError::ParserError(
-                                                "expected namespace".to_string(),
+                                                "Expected namespace".to_string(),
                                                 tokens[*index - 1].span,
                                             )));
                                         }
@@ -3611,7 +3615,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                             }
                             _ => {
                                 error = error.or(Some(JaktError::ParserError(
-                                    "expected ']'".to_string(),
+                                    "Expected ']'".to_string(),
                                     tokens[*index].span,
                                 )))
                             }
@@ -3619,7 +3623,7 @@ pub fn parse_operand(tokens: &[Token], index: &mut usize) -> (ParsedExpression, 
                     } else {
                         end = tokens[*index - 1].span;
                         error = error.or(Some(JaktError::ParserError(
-                            "expected ']'".to_string(),
+                            "Expected ']'".to_string(),
                             tokens[*index - 1].span,
                         )));
                     }
@@ -3896,7 +3900,7 @@ pub fn parse_set(tokens: &[Token], index: &mut usize) -> (ParsedExpression, Opti
                 trace!("ERROR: expected '{'");
 
                 error = error.or(Some(JaktError::ParserError(
-                    "expected '{'".to_string(),
+                    "Expected '{'".to_string(),
                     tokens[*index].span,
                 )));
             }
@@ -3978,7 +3982,7 @@ pub fn parse_array(tokens: &[Token], index: &mut usize) -> (ParsedExpression, Op
                 trace!("ERROR: expected '['");
 
                 error = error.or(Some(JaktError::ParserError(
-                    "expected '('".to_string(),
+                    "Expected '('".to_string(),
                     tokens[*index].span,
                 )));
             }
@@ -4115,7 +4119,7 @@ pub fn parse_array(tokens: &[Token], index: &mut usize) -> (ParsedExpression, Op
     if end >= tokens.len() || tokens[end].contents != TokenContents::RSquare {
         // We want to override other parse errors when we can't find the ']'.
         error = Some(JaktError::ParserErrorWithHint(
-            "expected ']' to close the array".to_string(),
+            "Expected ‘]’ to close the array".to_string(),
             tokens[end].span,
             "array started here".to_string(),
             tokens[start].span,
@@ -4232,7 +4236,7 @@ pub fn parse_variable_declaration(
                         visibility,
                     },
                     Some(JaktError::ParserError(
-                        "expected type".to_string(),
+                        "Expected type".to_string(),
                         tokens[*index].span,
                     )),
                 )
@@ -4245,7 +4249,7 @@ pub fn parse_variable_declaration(
             *index += 1;
             (
                 ParsedVarDecl::new(span, None),
-                Some(JaktError::ParserError("expected name".to_string(), span)),
+                Some(JaktError::ParserError("Expected name".to_string(), span)),
             )
         }
     }
@@ -4306,7 +4310,7 @@ pub fn parse_shorthand_type(
         (
             ParsedType::Empty,
             err.or(Some(JaktError::ParserError(
-                "expected ]".to_string(),
+                "Expected ]".to_string(),
                 tokens[*index].span,
             ))),
         )
@@ -4332,7 +4336,7 @@ pub fn parse_shorthand_type(
         (
             ParsedType::Empty,
             err.or(Some(JaktError::ParserError(
-                "expected ]".to_string(),
+                "Expected ]".to_string(),
                 tokens[*index].span,
             ))),
         )
@@ -4372,7 +4376,7 @@ pub fn parse_shorthand_type(
         (
             ParsedType::Empty,
             error.or(Some(JaktError::ParserError(
-                "expected )".to_string(),
+                "Expected )".to_string(),
                 tokens[*index].span,
             ))),
         )
@@ -4455,7 +4459,7 @@ pub fn parse_typename(tokens: &[Token], index: &mut usize) -> (ParsedType, Optio
                 trace!("ERROR: expected type name");
 
                 error = error.or(Some(JaktError::ParserError(
-                    "expected type name".to_string(),
+                    "Expected type name".to_string(),
                     tokens[*index].span,
                 )));
             }
@@ -4559,7 +4563,7 @@ pub fn parse_typename(tokens: &[Token], index: &mut usize) -> (ParsedType, Optio
                                     return (
                                         unchecked_type,
                                         Some(JaktError::ParserError(
-                                            "expected name after".to_string(),
+                                            "Expected name after".to_string(),
                                             tokens[*index - 1].span,
                                         )),
                                     )
@@ -4715,7 +4719,7 @@ pub fn parse_call(tokens: &[Token], index: &mut usize) -> (ParsedCall, Option<Ja
                         *index = index_reset;
                         return (
                             call,
-                            Some(JaktError::ParserError("expected '('".to_string(), *span)),
+                            Some(JaktError::ParserError("Expected '('".to_string(), *span)),
                         );
                     }
                 }
@@ -4783,7 +4787,7 @@ pub fn parse_call(tokens: &[Token], index: &mut usize) -> (ParsedCall, Option<Ja
             trace!("ERROR: expected function call");
 
             error = error.or(Some(JaktError::ParserError(
-                "expected function call".to_string(),
+                "Expected function call".to_string(),
                 tokens[*index].span,
             )));
         }
