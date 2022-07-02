@@ -7,8 +7,10 @@ import parser { BinaryOperator, FunctionLinkage }
 import typechecker {
     BuiltinType, CheckedBlock, CheckedCall, CheckedExpression,
     CheckedFunction, CheckedProgram, CheckedStatement, CheckedStruct,
-    ModuleId, ScopeId, StructId, EnumId, Type, TypeId, expression_type }
-import utility { panic, todo }
+    Module, ModuleId, Scope, ScopeId, StructId, EnumId, Type, TypeId, expression_type,
+    CheckedEnum, unknown_type_id, CheckedMatchCase, FunctionId, CheckedMatchBody }
+import utility { panic, todo, join, prepend_to_each, Span }
+
 
 enum AllowedControlExits {
     /// No control exit statements allowed
@@ -78,13 +80,59 @@ struct ControlFlowState {
     }
 }
 
+struct CodegenDebugInfo {
+    // FIXME: Add support for multiple source files
+    file_name: String
+    file_contents: [u8]
+    line_spans: [(usize, usize)]
+    statement_span_comments: bool
+
+    function span_to_source_location(mut this, anon span: Span) throws -> String {
+        if .line_spans.is_empty() {
+            .gather_line_spans()
+        }
+
+        mut line_index = 0uz
+        while line_index < .line_spans.size() {
+            if span.start >= .line_spans[line_index].0 and span.start <= .line_spans[line_index].1 {
+                let column_index = span.start - .line_spans[line_index].0
+                return format("{}:{}:{}", .file_name, line_index+1, column_index+1)
+            }
+            line_index += 1
+        }
+
+        panic("Reached end of file and could not find index")
+        return ""
+    }
+
+    function gather_line_spans(mut this) throws {
+        mut idx = 0uz
+        mut start = idx
+        while idx < .file_contents.size() {
+            if .file_contents[idx] == b'\n' {
+                .line_spans.push((start, idx))
+                start = idx + 1
+            }
+            idx += 1
+        }
+        if start < idx {
+            .line_spans.push((start, idx))
+        }
+    }
+}
+
 struct CodeGenerator {
 
     program: CheckedProgram
     control_flow_state: ControlFlowState
     entered_yieldable_blocks: [(String, String)] // label, variable name
+    deferred_output: String
+    current_function: CheckedFunction?
+    debug_info: CodegenDebugInfo
+    namespace_stack: [String]
 
-    function generate(anon program: CheckedProgram) throws -> String {
+    function generate(anon program: CheckedProgram, file_name: String, file_contents: [u8], debug_info: bool) throws -> String {
+        let none_function: CheckedFunction? = None
         mut generator = CodeGenerator(
             program
             control_flow_state: ControlFlowState(
@@ -93,6 +141,15 @@ struct CodeGenerator {
                 match_nest_level: 0
             )
             entered_yieldable_blocks: []
+            deferred_output: ""
+            current_function: none_function
+            debug_info: CodegenDebugInfo(
+                file_name
+                file_contents
+                line_spans: []
+                statement_span_comments: debug_info
+            )
+            namespace_stack: []
         )
 
         mut output = ""
@@ -101,18 +158,342 @@ struct CodeGenerator {
         output += "namespace Jakt {\n"
 
         for module in generator.program.modules.iterator() {
+            let scope_id = ScopeId(module: ModuleId(id: 0), id: 0)
+            let scope = generator.program.get_scope(scope_id)
 
-            for struct_ in module.structures.iterator() {
-                output += generator.codegen_struct(struct_)
+            if not module.is_root {
+                output += "namespace "
+                output += module.name
+                output += " {\n"
             }
 
-            for function_ in module.functions.iterator() {
-                // FIXME: Set current function ID in the context
-                output += generator.codegen_function(function_)
+            output += generator.codegen_namespace_predecl(scope, current_module: module)
+
+            if not module.is_root {
+                output += "}\n"
             }
         }
 
-        output += "}\n"
+
+        for module in generator.program.modules.iterator() {
+            let scope_id = ScopeId(module: ModuleId(id: 0), id: 0)
+            let scope = generator.program.get_scope(scope_id)
+
+            if not module.is_root {
+                output += "namespace "
+                output += module.name
+                output += " {\n"
+            }
+
+            output += generator.codegen_namespace(scope, current_module: module)
+
+            if not module.is_root {
+                output += "}\n"
+            }
+        }
+
+        output += generator.deferred_output
+
+        output += "} // namespace Jakt\n"
+
+        return output
+    }
+
+    function codegen_namespace(mut this, scope: Scope, current_module: Module) throws -> String {
+        mut output = ""
+
+        // FIXME: This wants to be a {TypeId}
+        mut seen_types: {usize} = {}
+
+        for name_and_struct_id in scope.structs.iterator() {
+            let struct_id = name_and_struct_id.1
+            if not struct_id.module.equals(current_module.id) {
+                continue
+            }
+            let struct_ = .program.get_struct(struct_id)
+            if seen_types.contains(struct_.type_id.id) {
+                continue
+            }
+            output += .codegen_struct(struct_)
+            output += "\n"
+        }
+
+        for name_and_enum_id in scope.enums.iterator() {
+            let enum_id = name_and_enum_id.1
+            if not enum_id.module.equals(current_module.id) {
+                continue
+            }
+            let enum_ = .program.get_enum(enum_id)
+            if seen_types.contains(enum_.type_id.id) {
+                continue
+            }
+            output += .codegen_enum(enum_)
+            output += "\n"
+        }
+
+        for child_scope_id in scope.children.iterator() {
+            let child_scope = .program.get_scope(child_scope_id)
+            if child_scope.namespace_name.has_value() {
+                let name = child_scope.namespace_name!
+                .namespace_stack.push(name)
+                output += "namespace "
+                output += name
+                output += " {\n"
+                output += .codegen_namespace(scope: child_scope, current_module)
+                output += "}\n"
+                // FIXME: It's awkward that we need a temporary to avoid the C++ nodiscard warning
+                let dummy = .namespace_stack.pop()
+            }
+        }
+
+        for name_and_function_id in scope.functions.iterator() {
+            let function_id = name_and_function_id.1
+            if not function_id.module.equals(current_module.id) {
+                continue
+            }
+
+            let function_ = .program.get_function(function_id)
+
+            let previous_function = .current_function
+            .current_function = function_
+            defer .current_function = previous_function
+
+            if function_.linkage is External or function_.type is ImplicitConstructor or function_.type is ImplicitEnumConstructor {
+                continue
+            }
+
+            output += .codegen_function(function_)
+            output += "\n"
+        }
+
+        for name_and_struct_id in scope.structs.iterator() {
+            let struct_id = name_and_struct_id.1
+            if not struct_id.module.equals(current_module.id) {
+                continue
+            }
+            let struct_ = .program.get_struct(struct_id)
+
+            if struct_.definition_linkage is External {
+                continue
+            }
+
+            if not struct_.generic_parameters.is_empty() {
+                continue
+            }
+
+            let scope = .program.get_scope(struct_.scope_id)
+            for name_and_function_id in scope.functions.iterator() {
+                let function_id = name_and_function_id.1
+                let function_ = .program.get_function(function_id)
+                let previous_function = .current_function
+                .current_function = function_
+                defer .current_function = previous_function
+
+                if not function_.type is ImplicitConstructor and not function_.type is ImplicitEnumConstructor {
+                    output += .codegen_function_in_namespace(function_, containing_struct: struct_.type_id)
+                    output += "\n"
+                }
+            }
+        }
+
+        for name_and_enum_id in scope.enums.iterator() {
+            let enum_id = name_and_enum_id.1
+            if not enum_id.module.equals(current_module.id) {
+                continue
+            }
+            let enum_ = .program.get_enum(enum_id)
+
+            if enum_.definition_linkage is External {
+                continue
+            }
+
+            if not enum_.generic_parameters.is_empty() {
+                continue
+            }
+
+            let scope = .program.get_scope(enum_.scope_id)
+            for name_and_function_id in scope.functions.iterator() {
+                let function_id = name_and_function_id.1
+                let function_ = .program.get_function(function_id)
+                let previous_function = .current_function
+                .current_function = function_
+                defer .current_function = previous_function
+
+                if not function_.type is ImplicitConstructor and not function_.type is ImplicitEnumConstructor {
+                    output += .codegen_function_in_namespace(function_, containing_struct: enum_.type_id)
+                    output += "\n"
+                }
+            }
+        }
+
+        return output
+    }
+
+    function codegen_namespace_predecl(mut this, scope: Scope, current_module: Module) throws -> String {
+        mut output = ""
+        if scope.namespace_name.has_value() {
+            output += "namespace "
+            output += scope.namespace_name!
+            output += " {\n"
+        }
+
+        for name_and_struct_id in scope.structs.iterator() {
+            let struct_id = name_and_struct_id.1
+            if not struct_id.module.equals(current_module.id) {
+                continue
+            }
+            let struct_ = .program.get_struct(struct_id)
+            output += .codegen_struct_predecl(struct_)
+            output += "\n"
+        }
+
+        for name_and_enum_id in scope.enums.iterator() {
+            let enum_id = name_and_enum_id.1
+            if not enum_id.module.equals(current_module.id) {
+                continue
+            }
+            let enum_ = .program.get_enum(enum_id)
+            output += .codegen_enum_predecl(enum_)
+            output += "\n"
+        }
+
+        for child in scope.children.iterator() {
+            output += .codegen_namespace_predecl(scope: .program.get_scope(child), current_module)
+        }
+
+        for name_and_function_id in scope.functions.iterator() {
+            let function_id = name_and_function_id.1
+            if not function_id.module.equals(current_module.id) {
+                continue
+            }
+            let function_ = .program.get_function(function_id)
+            if function_.type is ImplicitEnumConstructor {
+                continue
+            }
+            let function_output = .codegen_function_predecl(function_)
+            if not function_.type is ImplicitConstructor and function_.name != "main" {
+                output += function_output
+                output += "\n"
+            }
+        }
+
+        if scope.namespace_name.has_value() {
+            output += "}\n"
+        }
+        return output
+    }
+
+    function codegen_function_predecl(mut this, function_: CheckedFunction) throws -> String {
+        mut output = ""
+
+        // FIXME: for now, just exit early if we're a constructor
+        if function_.type is ImplicitConstructor {
+            return ""
+        }
+
+        if function_.linkage is External {
+            output += "extern "
+        }
+
+        if not function_.generic_params.is_empty() {
+            output += "template <"
+            mut first = true
+            for generic_parameter in function_.generic_params.iterator() {
+                if first {
+                    first = false
+                } else {
+                    output += ","
+                }
+                output += "typename "
+                let type_id = match generic_parameter {
+                    InferenceGuide(type_id) => type_id
+                    Parameter(type_id) => type_id
+                }
+                output += .codegen_type(type_id)
+            }
+            output += ">"
+        }
+
+        if function_.name == "main" {
+            output += "ErrorOr<int>"
+        } else {
+            if function_.is_static() and not function_.linkage is External {
+                output += "static "
+            }
+            let naked_return_type = .codegen_type(function_.return_type_id)
+            let return_type = match function_.can_throw {
+                true => format("ErrorOr<{}>", naked_return_type)
+                else => naked_return_type
+            }
+            output += return_type
+        }
+
+        output += " "
+        output += function_.name
+        output += "("
+
+        mut first = true
+        for param in function_.params.iterator() {
+            if first and param.variable.name == "this" {
+                continue
+            }
+
+            if first {
+                first = false
+            } else {
+                output += ", "
+            }
+
+            if not param.variable.is_mutable {
+                output += "const "
+            }
+
+            output += .codegen_type(param.variable.type_id)
+            output += " "
+            output += param.variable.name
+        }
+        output += ")"
+
+        if not function_.is_static() and not function_.is_mutating() {
+            output += " const;"
+        } else {
+            output += ";"
+        }
+
+        output += "\n"
+
+        return output
+    }
+
+    function codegen_struct_predecl(mut this, struct_: CheckedStruct) throws -> String {
+        if struct_.definition_linkage is External {
+            return ""
+        }
+        mut output = ""
+
+        if not struct_.generic_parameters.is_empty() {
+            output += "template <"
+            mut first = true
+            for generic_parameter in struct_.generic_parameters.iterator() {
+                if first {
+                    first = false                
+                } else {
+                    output += ","
+                }
+                output += "typename "
+                output += .codegen_type(generic_parameter)
+            }
+            output += ">"
+        }
+
+        output += match struct_.record_type {
+            Class => "class "
+            Struct => "struct "
+            else => ""
+        }
+
+        output += struct_.name
+        output += ";"
 
         return output
     }
@@ -124,24 +505,41 @@ struct CodeGenerator {
             return ""
         }
 
+        mut generic_parameter_names: [String] = []
         if not struct_.generic_parameters.is_empty() {
-            output += "template <"
-        }
+            for generic_parameter in struct_.generic_parameters.iterator() {
+                generic_parameter_names.push(.codegen_type(generic_parameter))
+            }
 
-        // FIXME: generic parameter names
-
-        if not struct_.generic_parameters.is_empty() {
-            output += "> "
+            output += format("template <{}>", join(prepend_to_each(generic_parameter_names, prefix: "typename "), separator: ", "))
         }
 
         match struct_.record_type {
             Class => {
-                todo("codegen_struct Class")
+                mut class_name_with_generics = ""
+                class_name_with_generics += struct_.name
+                mut first = true
+                for generic_parameter in struct_.generic_parameters.iterator() {
+                    if not first {
+                        class_name_with_generics += ", "
+                    } else {
+                        class_name_with_generics += "<"
+                        first = false
+                    }
+                    class_name_with_generics += .codegen_type(generic_parameter)
+                }
+                if not struct_.generic_parameters.is_empty() {
+                    class_name_with_generics += ">"
+                }
+
+                output += format("class {} : public RefCounted<{}>, public Weakable<{}> {{\n", struct_.name, class_name_with_generics, class_name_with_generics)
+                output += "  public:\n"
+                output += format("virtual ~{}() = default;\n", struct_.name)
             }
             Struct => {
-                output += "struct "
-                output += struct_.name
-                output += " { "
+                output += format("struct {}", struct_.name)
+                output += " {\n"
+                output += "  public:\n"
             }
             SumEnum => {
                 todo("codegen_struct SumEnum")
@@ -160,9 +558,342 @@ struct CodeGenerator {
             output += ";"
         }
 
+        let scope = .program.get_scope(struct_.scope_id)
+        for fn in scope.functions.iterator() {
+            let previous_function_id = .current_function
+
+            let function_ = .program.get_function(fn.1)
+            .current_function = Some(function_)
+
+            if function_.type is ImplicitConstructor {
+                let function_output = .codegen_constructor(function_)
+
+                output += function_output
+                output += "\n"
+            } else {
+                if struct_.generic_parameters.is_empty() {
+                    output += .codegen_function_predecl(function_)
+                } else {
+                    output += .codegen_function(function_)
+                }
+            }
+
+            .current_function = previous_function_id
+        }
+
+        output += .codegen_debug_description_getter(struct_)
+
         output += "};"
 
+        .deferred_output += .codegen_ak_formatter(name: struct_.name, generic_parameter_names)
+
         return output
+    }
+
+    function codegen_enum_predecl(mut this, enum_: CheckedEnum) throws -> String => match enum_.record_type {
+        Class => {
+            todo("codegen_enum_predecl class record type")
+            yield ""
+        }
+        else => .codegen_nonrecursive_enum_predecl(enum_)
+    }
+
+    function codegen_nonrecursive_enum_predecl(mut this, enum_: CheckedEnum) throws -> String {
+        mut output = ""
+
+        if not enum_.underlying_type_id.equals(unknown_type_id()) {
+            if .program.is_integer(enum_.underlying_type_id) {
+                output += "enum class "
+                output += enum_.name
+                output += ": "
+                output += .codegen_type(enum_.underlying_type_id)
+                output += ";\n"
+                return output
+            } else {
+                todo("Enums with a non-integer underlying type")
+            }
+        }
+
+        let is_generic = not enum_.generic_parameters.is_empty()
+        mut template_args_array: [String] = []
+        for generic_parameter in enum_.generic_parameters.iterator() {
+            match .program.get_type(generic_parameter) {
+                TypeVariable(name) => template_args_array.push("typename " + name)
+                else => {}
+            }
+        }
+        mut template_args = join(template_args_array, separator: ", ")
+
+        output += format("namespace {}_Details", enum_.name) + " {\n"
+        for variant in enum_.variants.iterator() {
+            match variant {
+                Untyped(name) | StructLike(name) | Typed(name) => {
+                    if is_generic {
+                        output += format("template<{}>\n", template_args)
+                    }
+                    output += format("struct {};\n", name)
+                }
+                else => {}
+            }
+        }
+        output += "}\n"
+
+        if is_generic {
+            output += format("template<{}>\n", template_args)
+        }
+        output += format("struct {};\n", enum_.name)
+
+        return output
+    }
+
+    function codegen_enum(mut this, enum_: CheckedEnum) throws -> String {
+        mut output = ""
+        if not enum_.underlying_type_id.equals(unknown_type_id()) {
+            if .program.is_integer(enum_.underlying_type_id) {
+                output += "enum class " + enum_.name + ": " + .codegen_type(enum_.underlying_type_id) + " {\n"
+                for variant in enum_.variants.iterator() {
+                    output += match variant {
+                        WithValue(name, expr) => name + " = " + .codegen_expression(expr) + ",\n"
+                        else => {
+                            todo(format("codegen_enum can't generate variant: {}", variant))
+                            yield ""
+                        }
+                    }
+                }
+                return output + "};\n"
+            } else {
+                todo("Enums with a non-integer underlying type")
+            }
+        }
+
+        let is_generic = not enum_.generic_parameters.is_empty()
+        mut generic_parameter_names: [String] = []
+        for generic_parameter in enum_.generic_parameters.iterator() {
+            match .program.get_type(generic_parameter) {
+                TypeVariable(name) => generic_parameter_names.push(name)
+                else => {}
+            }
+        }
+        mut template_args = join(prepend_to_each(generic_parameter_names, prefix: "typename "), separator: ", ")
+        output += "namespace " + enum_.name + "_Details {\n"
+        for variant in enum_.variants.iterator() {
+            match variant {
+                Untyped(name) => {
+                    if is_generic {
+                        output += "template<" + template_args + ">\n"
+                    }
+                    output += "struct " + name + " {};\n"
+                }
+                StructLike(name, fields) => {
+                    if is_generic {
+                        output += "template<" + template_args + ">\n"
+                    }
+                    output += "struct " + name + " {\n"
+                    for field in fields.iterator() {
+                        let var = .program.get_variable(field)
+                        output += format("{} {};\n", .codegen_type(var.type_id), var.name)
+                    }
+                    output += "template<"
+                    mut generic_typenames: [String] = []
+                    mut generic_argument_types: [String] = []
+                    mut initializers: [String] = []
+                    for i in 0..fields.size() {
+                        generic_typenames.push(format("typename _MemberT{}", i))
+                        generic_argument_types.push(format("_MemberT{}&& member_{}", i, i))
+
+                        mut initializer = .program.get_variable(fields[i]).name + "{ forward<_MemberT"
+                        initializer += format("{}>(member_{}", i, i) + ")}"
+                        initializers.push(initializer)
+                    }
+                    output += join(generic_typenames, separator: ", ")
+                    output += ">\n"
+                    output += name + "(" + join(generic_argument_types, separator: ", ") + "):\n"
+                    output += join(initializers, separator: ",\n") + "\n{}\n"
+                    output +="};\n"
+                }
+                Typed(name, type_id) => {
+                    if is_generic {
+                        output += "template<" + template_args + ">\n"
+                    }
+                    output += "struct " + name + "{\n"
+                    output += .codegen_type(type_id) + " value;\n"
+                    output += "template<typename... Args>\n"
+                    output += name + "(Args&&... args): value { forward<Args>(args)... } {}\n"
+                    output += "};\n"
+                }
+                else => {
+                    todo(format("codegen enum variant: {}", variant))
+                }
+            }
+        }
+        output += "}\n"
+
+        if is_generic {
+            output += "template<" + template_args + ">\n"
+        }
+        output += "struct " + enum_.name + " : public Variant<"
+        mut variant_names: [String] = []
+        mut variant_arguments_array: [String] = []
+        for variant in enum_.variants.iterator() {
+            mut argument = enum_.name + "_Details::" + variant.name()
+            if is_generic {
+                argument += format("<{}>", join(generic_parameter_names, separator: ", "))
+            }
+            variant_arguments_array.push(argument)
+            variant_names.push(variant.name())
+        }
+        let variant_args = join(variant_arguments_array, separator: ", ")
+        output += variant_args + "> {\n"
+        output += "using Variant<" + variant_args + ">::Variant;\n"
+
+        for name in variant_names.iterator() {
+            output += "    using " +  name + " = " + enum_.name + "_Details::" + name
+            if is_generic {
+                output += "<"
+                output += join(generic_parameter_names, separator: ", ")
+                output += ">"
+            }
+            output += ";\n"
+        }
+
+        output += .codegen_enum_debug_description_getter(enum_)
+
+        // FIXME: scope functions
+
+        output += "};\n"
+
+        let module = .program.get_module(enum_.scope_id.module)
+        let name = match module.is_root {
+            true => enum_.name
+            else => format("{}::{}", module.name, enum_.name)
+        }
+
+        .deferred_output += .codegen_ak_formatter(name, generic_parameter_names)
+
+        return output
+    }
+
+    function codegen_debug_description_getter(mut this, struct_: CheckedStruct) throws -> String {
+        mut output = "ErrorOr<String> debug_description() const { "
+        output += "auto builder = MUST(StringBuilder::create());"
+        output += format("TRY(builder.append(\"{}(\"));", struct_.name)
+        output += "JaktInternal::_pretty_print_level++;\n"
+
+        mut i = 0uz
+        for field in struct_.fields.iterator() {
+            let field_var = .program.get_variable(field)
+            output += "TRY(JaktInternal::_output_pretty_indent(builder));"
+            output += format("TRY(builder.append(\"{}: \"));", field_var.name)
+            output += "TRY(builder.appendff(\""
+            if .program.is_string(field_var.type_id) {
+                output += "\\\"{}\\\""
+            } else {
+                output += "{}"
+            }
+            if i != struct_.fields.size() - 1 {
+                output += ", "
+            }
+            output += "\", "
+
+            output += match .program.get_type(field_var.type_id) {
+                Struct(struct_id) => match .program.get_struct(struct_id).record_type {
+                    Class => "*"
+                    else => ""
+                }
+                else => ""
+            }
+            output += field_var.name + "));\n"
+            i++
+        }
+
+        output += "JaktInternal::_pretty_print_level--;\n"
+        output += "TRY(builder.append(\")\"));"
+        output += "return builder.to_string();"
+        output += " }"
+        return output
+    }
+
+    function codegen_enum_debug_description_getter(mut this, enum_: CheckedEnum) throws -> String {
+        mut output = ""
+
+        output += "ErrorOr<String> debug_description() const { "
+        output += "auto builder = TRY(StringBuilder::create());"
+        output += "TRY(this->visit("
+
+        mut variant_lambdas: [String] = []
+        for variant in enum_.variants.iterator() {
+            let name = variant.name()
+            mut lambda = format("[&]([[maybe_unused]] {} const& that)", name) + " -> ErrorOr<void> {\n"
+            lambda += format("TRY(builder.append(\"{}::{}\"));", enum_.name, name)
+
+            match variant {
+                StructLike(fields) => {
+                    lambda += "TRY(builder.append(\"(\"));"
+                    lambda += "JaktInternal::_pretty_print_level++;"
+                    mut i = 0uz
+                    for field in fields.iterator() {
+                        lambda += "TRY(JaktInternal::_output_pretty_indent(builder));"
+                        let var = .program.get_variable(field)
+                        lambda += format("TRY(builder.append(\"{}: \"));", var.name)
+                        if .program.is_string(var.type_id) {
+                            lambda += "TRY(builder.append(\"\\\"\"));"
+                        }
+                        lambda += "TRY(builder.appendff(\"{}\", that." + var.name + "));"
+                        if .program.is_string(var.type_id) {
+                            lambda += "TRY(builder.append(\"\\\"\"));"
+                        }
+                        if i != fields.size() - 1 {
+                            lambda += "TRY(builder.append(\", \"));"
+                        }
+                        i++
+                    }
+                    lambda += "JaktInternal::_pretty_print_level--;"
+                    lambda += "TRY(builder.append(\")\"));"
+                }
+                Typed(type_id) => {
+                    lambda += "TRY(builder.append(\"(\"));"
+                    if .program.is_string(type_id) {
+                        lambda += "TRY(builder.append(\"\\\"\"));"
+                    }
+                    lambda += "TRY(builder.appendff(\"{}\", that.value));"
+                    if .program.is_string(type_id) {
+                        lambda += "TRY(builder.append(\"\\\"\"));"
+                    }
+                    lambda += "TRY(builder.append(\")\"));"
+                }
+                else => {}
+            }
+
+            lambda += "return {}; }"
+            variant_lambdas.push(lambda)
+        }
+        output += join(variant_lambdas, separator: ",")
+
+        output += "));" + "return builder.to_string();" + "}"
+
+        return output
+    }
+
+    function codegen_ak_formatter(mut this, name: String, generic_parameter_names: [String]) throws -> String {
+        mut output = ""
+
+        let template_args = join(prepend_to_each(generic_parameter_names, prefix: "typename "), separator: ", ")
+        let generic_type_args = join(generic_parameter_names, separator: ", ")
+
+        // FIXME: track namespace_stack so we can generate qualified name
+        mut qualified_name = name
+        if not generic_parameter_names.is_empty() {
+            qualified_name += format("<{}>\n", generic_type_args)
+        }
+
+        output += format("template<{}>", template_args)
+        output += format("struct Formatter<{}> : Formatter<StringView>", qualified_name)
+        output += "{\n"
+        output += format("ErrorOr<void> format(FormatBuilder& builder, {} const& value)\n", qualified_name)
+        output += "{ if (m_alternative_form) { JaktInternal::_pretty_print_enabled = true; }"
+        output += "return Formatter<StringView>::format(builder, MUST(value.debug_description())); }"
+
+        return output + "};\n"
     }
 
     function codegen_expression(mut this, anon expression: CheckedExpression) throws -> String => match expression {
@@ -238,6 +969,7 @@ struct CodeGenerator {
         }
         Block(block) => .codegen_block(block)
         Call(call) => .codegen_call(call)
+        MethodCall(expr, call) => .codegen_method_call(expr, call)
         Boolean(val) => match val {
             true => "true"
             else => "false"
@@ -252,9 +984,15 @@ struct CodeGenerator {
                 RawAddress => "&"
                 LogicalNot => "!"
                 BitwiseNot => "~"
-                Is => {
-                    todo("codegen Is")
-                    yield ""
+                Is(type_id) => {
+                    let is_type = match .program.get_type(type_id) {
+                        Struct(id) => {
+                            let type_module = .program.get_module(id.module)
+                            yield .program.get_struct(id).name
+                        }
+                        else => .codegen_type(type_id)
+                    }
+                    yield "is<" + is_type + ">("
                 }
                 TypeCast(cast) => {
                     let is_integer = .program.is_integer(cast.type_id())
@@ -282,9 +1020,23 @@ struct CodeGenerator {
                 PostIncrement => "++"
                 PostDecrement => "--"
                 TypeCast | Is => ")"
-                IsEnumVariant => {
-                    todo("codegen IsEnumVariant")
-                    yield ""
+                IsEnumVariant(name, enum_type_id) => {
+                    mut suffix = ")"
+                    let is_boxed = match .program.get_type(enum_type_id) {
+                        Enum(enum_id) => .program.get_enum(enum_id).record_type is Class
+                        else => false
+                    }
+                    if is_boxed {
+                        suffix += "->"
+                    } else {
+                        suffix += "."
+                    }
+                    suffix += "has<"
+                    suffix += .codegen_type_possibly_as_namespace(type_id: enum_type_id, as_namespace: true)
+                    suffix += "::"
+                    suffix += name
+                    suffix += ">("
+                    yield suffix
                 }
                 else => ""
             }
@@ -319,10 +1071,152 @@ struct CodeGenerator {
                 => format("static_cast<{}>({}{})", type_name, val, suffix)
             }
         }
+        NamespacedVar(namespaces, var) => {
+            mut output = ""
+            for ns in namespaces.iterator() {
+                output += ns.name + "::"
+            }
+            yield output + var.name
+        }
+        Match(expr, match_cases, type_id, all_variants_constant) => .codegen_match(expr, match_cases, type_id, all_variants_constant)
         else => {
             todo(format("codegen_expression else: {}", expression))
             yield ""
         }
+    }
+
+    function codegen_match(mut this, expr: CheckedExpression, match_cases: [CheckedMatchCase], type_id: TypeId, all_variants_constant: bool) throws -> String {
+        mut output = ""
+
+        let expr_type = .program.get_type(expression_type(expr))
+        match expr_type {
+            Enum(enum_id) => {
+                output += .codegen_enum_match(
+                    enum_: .program.get_enum(enum_id)
+                    expr
+                    match_cases
+                    type_id
+                    all_variants_constant
+                )
+            }
+            else => {
+                todo("codegen generic match")
+            }
+        }
+
+        return output
+    }
+
+    function codegen_enum_match(mut this, enum_: CheckedEnum, expr: CheckedExpression, match_cases: [CheckedMatchCase], type_id: TypeId, all_variants_constant: bool) throws -> String {
+        mut output = ""
+        output += .control_flow_state.choose_control_flow_macro()
+
+        if enum_.underlying_type_id.equals(unknown_type_id()) {
+            output += "(([&]() -> JaktInternal::ExplicitValueOrControlFlow<"
+            output += .codegen_type(type_id)
+            output += ", "
+            output += .codegen_function_return_type(function_: .current_function!)
+            output += ">{\n"
+            output += "auto&& __jakt_match_variant_maybe_deref = " + .codegen_expression(expr) + ";"
+            output += "auto&& __jakt_match_variant = "
+            // FIXME: needs deref
+            output += "__jakt_match_variant_maybe_deref;\nswitch(__jakt_match_variant.index()) {\n"
+
+            mut has_default = false
+            for match_case in match_cases.iterator() {
+                match match_case {
+                    EnumVariant(name, args, subject_type_id, index, scope_id, body) => {
+                        let enum_type = .program.get_type(subject_type_id)
+                        let enum_id = match enum_type {
+                            Enum(id) => id
+                            else => {
+                                panic("Expected enum type")
+                                // FIXME: unreachable
+                                yield EnumId(module: ModuleId(id: 0), id: 0)
+                            }
+                        }
+                        let match_case_enum = .program.get_enum(enum_id)
+                        let variant = match_case_enum.variants[index]
+                        output += "case " + format("{}", index) + ": {\n"
+                        match variant {
+                            Untyped(name) => {
+                                output += format("auto&& __jakt_match_value = __jakt_match_variant.template get<typename {}::{}>();\n",
+                                    .codegen_type_possibly_as_namespace(type_id: subject_type_id, as_namespace: true),
+                                    name
+                                )
+                            }
+                            Typed(name, type_id) => {
+                                output += format(
+                                    "auto&& __jakt_match_value = __jakt_match_variant.template get<typename {}::{}>();\n",
+                                    .codegen_type_possibly_as_namespace(type_id: subject_type_id, as_namespace: true),
+                                    name
+                                )
+                                if not args.is_empty() {
+                                    let arg = args[0]
+                                    let var = .program.find_var_in_scope(scope_id, var: arg.binding)!
+                                    output += format("{} const& {} = __jakt_match_value.value;\n", .codegen_type(var.type_id), arg.binding)
+                                }
+                            }
+                            else => {
+                                todo(format("codegen_enum_match match variant else: {}", variant))
+                            }
+                        }
+                        output += .codegen_match_body(body, return_type_id: type_id)
+                        output += "};/*case end*/\n"
+                    }
+                    CatchAll(body) => {
+                        has_default = true
+
+                        output += "default: {\n"
+                        output += .codegen_match_body(body, return_type_id: type_id)
+                        output += "};/*case end*/\n"
+                    }
+                    else => {
+                        panic("Matching enum subject with non-enum value")
+                    }
+                }
+            }
+            if not has_default {
+                if enum_.variants.size() != match_cases.size() {
+                    panic("Inexhaustive match statement")
+                }
+                output += "default: VERIFY_NOT_REACHED();"
+            }
+            output += "}/*switch end*/\n"
+            output += "}()\n))"
+        } else {
+            // FIXME: underlying type enum match
+        }
+
+        return output
+    }
+
+    function codegen_match_body(mut this, body: CheckedMatchBody, return_type_id: TypeId) throws -> String {
+        mut output = ""
+        match body {
+            Block(block) => {
+                output += .codegen_block(block)
+
+                if return_type_id.equals(unknown_type_id()) {
+                    output += "return JaktInternal::ExplicitValue<void>();\n"
+                }
+            }
+            Expression => {
+                todo(format("codegen_match_body: {}", body))
+            }
+        }
+        return output
+    }
+
+    function codegen_function_return_type(mut this, anon function_: CheckedFunction) throws -> String {
+        if function_.is_static() and function_.name == "main" {
+            return "ErrorOr<int>"
+        }
+        let type_name = .codegen_type(function_.return_type_id)
+        if function_.can_throw {
+            return format("ErrorOr<{}>", type_name)
+        }
+        return type_name
     }
 
     function codegen_binary_expression(mut this, expression: CheckedExpression, type_id: TypeId, lhs: CheckedExpression, rhs: CheckedExpression, op: BinaryOperator) throws -> String {
@@ -477,6 +1371,71 @@ struct CodeGenerator {
         return output
     }
 
+    function codegen_method_call(mut this, expr: CheckedExpression, call: CheckedCall) throws -> String {
+        mut output = ""
+        if call.callee_throws {
+            output += "TRY("
+        }
+
+        output += "(("
+        output += .codegen_expression(expr)
+        output += ")"
+
+        let is_this = match expr {
+            Var(var) => var.name == "this"
+            else => false
+        }
+
+        if is_this {
+            output += "->"
+        } else {
+            match .program.get_type(expression_type(expr)) {
+                RawPtr => {
+                    output += "->"
+                }
+                Struct(id) => {
+                    let struct_ = .program.get_struct(id)
+                    if struct_.record_type is Class {
+                        output += "->"
+                    } else {
+                        output += "."
+                    }
+                }
+                Enum(id) => {
+                    let enum_ = .program.get_enum(id)
+                    if enum_.record_type is Class {
+                        output += "->"
+                    } else {
+                        output += "."
+                    }
+                }
+                else => {
+                    output += "."
+                }
+            }
+        }
+
+        output += call.name
+        output += "("
+
+        mut first = true
+        for name_and_expr in call.args.iterator() {
+            if first {
+                first = false
+            } else {
+                output += ","
+            }
+            output += .codegen_expression(name_and_expr.1)
+        }
+
+        output += "))"
+
+        if call.callee_throws {
+            output += ")"
+        }
+        return output
+    }
+
     function codegen_call(mut this, call: CheckedCall) throws -> String {
         mut output = ""
 
@@ -506,15 +1465,72 @@ struct CodeGenerator {
             else => {
                 if call.function_id.has_value() {
                     let type_module = .program.get_module(call.function_id!.module)
-                    if type_module.is_root or type_module.id.id == 0 or .program.get_function(call.function_id!).linkage is External or (not call.namespace_.is_empty() and call.namespace_[0].name == type_module.name)
-                    {
-                        output += type_module.name
-                        output += "::"
+                    let function_ = .program.get_function(call.function_id!)
+                    if function_.type is ImplicitConstructor or function_.type is ExternalClassConstructor {
+                        let type_id = call.return_type
+                        let type = .program.get_type(type_id)
+
+                        if call.function_id.has_value() {
+                            let function_id = call.function_id!
+                            let type_module = .program.get_module(function_id.module)
+                            if not (type_module.is_root or type_module.id.equals(ModuleId(id: 0))) {
+                                output += type_module.name
+                                output += "::"
+                            }
+                        }
+
+                        output += .codegen_namespace_path(call)
+                        match type {
+                            Struct(struct_id) => {
+                                let struct_ = .program.get_struct(struct_id)
+                                if struct_.record_type is Class {
+                                    output += call.name
+                                    output += "::"
+                                    output += "create"
+                                } else {
+                                    output += call.name
+                                }
+                            }
+                            GenericInstance(id, args) => {
+                                todo("Implement codegen for constructor call to GenericInstance")
+                            }
+                            else => {
+                                panic("Should be unreachable")
+                            }
+                        }
+
+                    } else if function_.type is ImplicitEnumConstructor {
+                        match .program.get_type(function_.return_type_id) {
+                            Enum(enum_id) => {
+                                let enum_ = .program.get_enum(enum_id)
+                                output += "typename "
+                                let enum_type_module = .program.get_module(enum_id.module)
+                                if not (enum_type_module.is_root or enum_type_module.id.equals(ModuleId(id: 0))) {
+                                    output += enum_type_module.name + "::"
+                                }
+                            }
+                            GenericEnumInstance(id) => {
+                                todo("codegen generic enum instance")
+                            }
+                            else => {
+                                panic("constructor expected enum type")
+                            }
+                        }
+
+                        output += .codegen_namespace_path(call)
+                        output += call.name
+                    } else {
+                        if not (type_module.is_root or type_module.id.id == 0 or function_.linkage is External or (not call.namespace_.is_empty() and call.namespace_[0].name == type_module.name))
+                        {
+                            output += type_module.name
+                            output += "::"
+                        }
+
+                        output += .codegen_namespace_path(call)
+                        output += call.name
                     }
                 }
 
-                output += .codegen_namespace_path(call)
-                output += call.name
                 output += "("
 
                 mut first = true
@@ -575,114 +1591,142 @@ struct CodeGenerator {
 
         // FIXME: yielded_type
 
-        output += "{"
+        output += "{\n"
 
         for statement in block.statements.iterator() {
             output += .codegen_statement(statement)
         }
 
-        output += "}"
+        output += "}\n"
 
         // FIXME: yielded_type
 
         return output
     }
 
-    function codegen_statement(mut this, statement: CheckedStatement) throws -> String => match statement {
-        Throw(expression) => "return " + .codegen_expression(expression) + ";"
-        Continue => match .control_flow_state.passes_through_match {
-            true => "return JaktInternal::LoopContinue{};"
-            else => "continue;"
-        }
-        Break => match .control_flow_state.passes_through_match {
-            true => "return JaktInternal::LoopBreak{};"
-            else => "break;"
-        }
-        Expression(expression) => .codegen_expression(expression) + ";\n"
-        Defer(statement) => {
-            // NOTE: We let the preprocessor generate a unique name for the RAII helper.
-            mut output = ""
-            output += "\n#define __SCOPE_GUARD_NAME __scope_guard_ ## __COUNTER__\n"
-            output += "ScopeGuard __SCOPE_GUARD_NAME ([&] \n"
-            output += "#undef __SCOPE_GUARD_NAME\n{"
-            {
-                let last_control_flow = .control_flow_state
-                .control_flow_state.passes_through_match = false
-                output += .codegen_statement(statement)
-                output += "});\n"
-                .control_flow_state = last_control_flow
+    function codegen_statement(mut this, statement: CheckedStatement) throws -> String {
+        mut add_newline = true
+        mut output = match statement {
+            Throw(expr) => "return " + .codegen_expression(expr) + ";"
+            Continue => match .control_flow_state.passes_through_match {
+                true => "return JaktInternal::LoopContinue{};"
+                else => "continue;"
             }
-            yield output
-        }
-        Return(expression) => match expression.has_value() {
-            true => "return (" + .codegen_expression(expression!) + ");\n"
-            else => "return;\n"
-        }
-        Loop(block) => {
-            mut output = ""
-            output += "for (;;) {"
-            let last_control_flow = .control_flow_state
-            .control_flow_state = last_control_flow.enter_loop()
-            let block_str = .codegen_block(block)
-            .control_flow_state = last_control_flow
-            output += block_str
-            output += "}"
-            yield output
-        }
-        While(condition, block) => {
-            mut output = ""
-            output += "while ("
-            output += .codegen_expression(expression: condition)
-            output += ") "
-            {
+            Break => match .control_flow_state.passes_through_match {
+                true => "return JaktInternal::LoopBreak{};"
+                else => "break;"
+            }
+            Expression(expr) => .codegen_expression(expr) + ";"
+            Defer(statement) => {
+                // NOTE: We let the preprocessor generate a unique name for the RAII helper.
+                mut output = ""
+                output += "\n#define __SCOPE_GUARD_NAME __scope_guard_ ## __COUNTER__\n"
+                output += "ScopeGuard __SCOPE_GUARD_NAME ([&] \n"
+                output += "#undef __SCOPE_GUARD_NAME\n{"
+                {
+                    let last_control_flow = .control_flow_state
+                    .control_flow_state.passes_through_match = false
+                    output += .codegen_statement(statement)
+                    output += "});"
+                    .control_flow_state = last_control_flow
+                }
+                yield output
+            }
+            Return(val) => match val.has_value() {
+                true => "return (" + .codegen_expression(val!) + ");"
+                else => "return;"
+            }
+            Loop(block) => {
+                mut output = ""
+                output += "for (;;)"
+                if .debug_info.statement_span_comments and statement.span().has_value() {
+                    output += format(" /* {} */ ", .debug_info.span_to_source_location(statement.span()!))
+                }
+                add_newline = false
                 let last_control_flow = .control_flow_state
                 .control_flow_state = last_control_flow.enter_loop()
-                let code = .codegen_block(block)
+                let block_str = .codegen_block(block)
                 .control_flow_state = last_control_flow
-                output += code
+                output += block_str
+                yield output
             }
-            yield output
-        }
-        Block(block) => .codegen_block(block)
-        Garbage => {
-            panic("Garbage statement in codegen")
-            // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
-            yield ""
-        }
-        VarDecl(var_id, init) => {
-            let var = .program.get_variable(var_id)
+            While(condition, block) => {
+                mut output = ""
+                output += "while ("
+                output += .codegen_expression(expression: condition)
+                output += ")"
 
-            mut output = ""
-            if not var.is_mutable {
-                output += "const "
+                if .debug_info.statement_span_comments and statement.span().has_value() {
+                    output += format(" /* {} */ ", .debug_info.span_to_source_location(statement.span()!))
+                }
+
+                {
+                    let last_control_flow = .control_flow_state
+                    .control_flow_state = last_control_flow.enter_loop()
+                    let code = .codegen_block(block)
+                    .control_flow_state = last_control_flow
+                    output += code
+                }
+                add_newline = false
+                yield output
             }
-            output += .codegen_type(var.type_id)
-            output += " "
-            output += var.name
-            output += " = "
-            output += .codegen_expression(init)
-            output += ";\n"
-            yield output
-        }
-        If(condition, then_block, else_statement) => {
-            mut output = "if ("
-            output += .codegen_expression(condition)
-            output += ") "
-            output += .codegen_block(block: then_block)
-
-            output += match else_statement.has_value() {
-                true => " else " + .codegen_statement(statement: else_statement!)
-                else => ""
+            Block(block) => .codegen_block(block)
+            Garbage => {
+                panic("Garbage statement in codegen")
+                // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
+                yield ""
             }
+            VarDecl(var_id, init) => {
+                let var = .program.get_variable(var_id)
 
-            yield output
+                mut output = ""
+                if not var.is_mutable {
+                    output += "const "
+                }
+                output += .codegen_type(var.type_id)
+                output += " "
+                output += var.name
+                output += " = "
+                output += .codegen_expression(init)
+                output += ";"
+                yield output
+            }
+            If(condition, then_block, else_statement) => {
+                mut output = "if ("
+                output += .codegen_expression(condition)
+                output += ")"
+
+                if .debug_info.statement_span_comments and statement.span().has_value() {
+                    output += format(" /* {} */ ", .debug_info.span_to_source_location(statement.span()!))
+                }
+
+                output += .codegen_block(block: then_block)
+
+                output += match else_statement.has_value() {
+                    true => "else " + .codegen_statement(statement: else_statement!)
+                    else => ""
+                }
+
+                add_newline = false
+
+                yield output
+            }
+            else => {
+                todo(format("codegen_statement - Missing statement codegen for {}", statement))
+                // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
+                yield ""
+            }
         }
-        else => {
-            eprintln("Missing statement codegen for {}", statement)
-            todo("codegen_statement")
-            // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
-            yield ""
+
+        if .debug_info.statement_span_comments and statement.span().has_value() and add_newline {
+            output += format(" /* {} */", .debug_info.span_to_source_location(statement.span()!))
         }
+
+        if add_newline {
+            output += "\n"
+        }
+
+        return output
     }
 
 
@@ -777,7 +1821,7 @@ struct CodeGenerator {
 
         if not as_namespace and checked_struct.record_type is Class {
             output += "NonnullRefPtr<"
-            if not type_module.is_root or type_module.id.equals(ModuleId(id: 0)) {
+            if not type_module.is_root and not type_module.id.equals(ModuleId(id: 0)) {
                 output += type_module.name
                 output += "::"
             }
@@ -828,6 +1872,157 @@ struct CodeGenerator {
         }
 
         return output
+    }
+
+    function codegen_constructor(mut this, anon function_: CheckedFunction) throws -> String {
+        let type_id = function_.return_type_id
+        let type_ = .program.get_type(type_id)
+
+        match type_ {
+            Struct(struct_id) => {
+                let structure = .program.get_struct(struct_id)
+
+                if structure.record_type is Class {
+                    mut output = ""
+
+                    output += "private:\n"
+
+                    output += format("explicit {}(", function_.name)
+                    mut first = true
+                    for param in function_.params.iterator() {
+                        if not first {
+                            output += ", "
+                        } else {
+                            first = false
+                        }
+
+                        let param_type_id = param.variable.type_id
+                        output += .codegen_type(param_type_id)
+                        output += "&& a_"
+                        output += param.variable.name
+                    }
+                    output += ")"
+
+                    if not function_.params.is_empty() {
+                        output += ": "
+                        mut first = true
+                        for param in function_.params.iterator() {
+                            if not first {
+                                output += ", "
+                            } else {
+                                first = false
+                            }
+
+                            output += param.variable.name
+                            output += "(move(a_"
+                            output += param.variable.name
+                            output += "))"
+                        }
+                    }
+
+                    output += "{}\n"
+
+                    mut class_name_with_generics = ""
+                    class_name_with_generics += structure.name
+
+                    first = true
+                    for generic_parameter in structure.generic_parameters.iterator() {
+                        if not first {
+                            class_name_with_generics += ", "
+                        } else {
+                            class_name_with_generics += "<"
+                            first = false
+                        }
+
+                        class_name_with_generics += .codegen_type(generic_parameter)
+                    }
+                    if not structure.generic_parameters.is_empty() {
+                        class_name_with_generics += ">"
+                    }
+
+                    output += "public:\n"
+                    output += format("static ErrorOr<NonnullRefPtr<{}>> create", class_name_with_generics)
+                    output += "("
+
+                    first = true
+                    for param in function_.params.iterator() {
+                        if not first {
+                            output += ", "
+                        } else {
+                            first = false
+                        }
+
+                        output += .codegen_type(param.variable.type_id)
+                        output += " "
+                        output += param.variable.name
+                    }
+
+                    output += format(") {{ auto o = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) {} (", class_name_with_generics)
+
+                    first = true
+                    for param in function_.params.iterator() {
+                        if not first {
+                            output += ", "
+                        } else {
+                            first = false
+                        }
+
+                        output += "move("
+                        output += param.variable.name
+                        output += ")"
+                    }
+
+                    output += "))); return o; }"
+
+                    return output
+                } else {
+                    mut output = ""
+                    output += function_.name
+                    output += "("
+
+                    mut first = true
+                    for param in function_.params.iterator() {
+                        if not first {
+                            output += ", "
+                        } else {
+                            first = false
+                        }
+
+                        output += .codegen_type(param.variable.type_id)
+                        output += " a_"
+                        output += param.variable.name
+                    }
+                    output += ") "
+
+                    if not function_.params.is_empty() {
+                        output += ":"
+                    }
+
+                    first = true
+                    for param in function_.params.iterator() {
+                        if not first {
+                            output += ", "
+                        } else {
+                            first = false
+                        }
+
+                        output += param.variable.name
+                        output += "(a_"
+                        output += param.variable.name
+                        output += ")"
+                    }
+
+                    output += "{}\n"
+
+                    return output
+                }
+            }
+            else => {
+                panic("internal error: call to a constructor, but not a struct/class type")
+                return ""
+            }
+        }
+        return ""
     }
 
     function codegen_function_in_namespace(mut this, function_: CheckedFunction, containing_struct: TypeId?) throws -> String {
@@ -894,7 +2089,7 @@ struct CodeGenerator {
             output += " const"
         }
 
-        output += "{"
+        output += " {\n"
 
         let last_control_flow = .control_flow_state
         .control_flow_state = last_control_flow.enter_function()
@@ -903,15 +2098,15 @@ struct CodeGenerator {
         output += block
 
         if is_main {
-            output += "return 0;"
+            output += "return 0;\n"
         } else {
             // FIXME: This should check if the id is BuiltinType::Void, but the baseline compiler chokes on that.
             if function_.can_throw and function_.return_type_id.id == 0 {
-                output += "return {};"
+                output += "return {};\n"
             }
         }
 
-        output += "}"
+        output += "}\n"
 
         return output
     }

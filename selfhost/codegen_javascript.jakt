@@ -7,7 +7,7 @@ import parser { BinaryOperator, FunctionLinkage }
 import typechecker {
     BuiltinType, CheckedBlock, CheckedCall, CheckedExpression,
     CheckedFunction, CheckedProgram, CheckedStatement, CheckedStruct,
-    ModuleId, ScopeId, StructId, EnumId, Type, TypeId, expression_type }
+    ModuleId, ScopeId, FunctionId, StructId, EnumId, Type, TypeId, expression_type }
 import utility { panic, todo }
 
 enum AllowedControlExits {
@@ -99,43 +99,37 @@ struct JavascriptCodeGenerator {
 
         mut output = ""
 
-        output += "const __jakt_internal_i64 = v => Math.floor(v);\n"
-        // FIXME: Should follow the same conventions as CPP's JaktInternal
-        output += "const __jakt_internal_checked_add = (type, a, b) => a + b;\n"
-        output += "const __jakt_internal_checked_sub = (type, a, b) => a - b;\n"
-        output += "const __jakt_internal_checked_mul = (type, a, b) => a * b;\n"
-        output += "const __jakt_internal_checked_div = (type, a, b) => a / b;\n"
-        output += "const __jakt_internal_checked_mod = (type, a, b) => a % b;\n"
+        mut file = File::open_for_reading("./selfhost/javascript_prelude.js")
+        let file_contents = file.read_all()
+        mut builder = StringBuilder::create();
+        for b in file_contents.iterator() {
+            builder.append(b)
+        }
 
-        output += "const TRY = (fn) => {\n"
-        output += "   return () => {\n"
-        output += "       try {\n"
-        output += "           return fn()\n"
-        output += "       }\n"
-        output += "       catch (error) {\n"
-        output += "           console.error('TRY failed')\n"
-        output += "           console.error(error)\n"
-        output += "           throw new Error(error)\n"
-        output += "       }\n"
-        output += "    }\n"
-        output += "}\n"
-
-        output += "const __jakt_internal_format = (input, ...args) => {\n"
-        output += "let output = input\n"
-        output += "args.forEach(arg => {\n"
-        output += "    output = output.replace('{}', arg)\n"
-        output += "})\n"
-        output += "return output\n"
-        output += "}\n"
+        output += builder.to_string()
 
         for module in generator.program.modules.iterator() {
 
+            mut generated_functions: [String] = []
+
             for struct_ in module.structures.iterator() {
                 output += generator.codegen_struct(struct_)
+                println("// generate: struct {} {}", struct_.name, struct_.scope_id.id)
+                let scope = generator.program.get_scope(id: struct_.scope_id)
+                for function_id in scope.functions.iterator() {
+                    let function_ =  program.get_function(function_id.1)
+                    output += generator.codegen_function_in_namespace(function_, containing_struct: struct_.type_id)
+                    // FIXME: Set current function ID in the context
+                    generated_functions.push(function_.name)
+                }
             }
 
             for function_ in module.functions.iterator() {
-                // FIXME: Set current function ID in the context
+                if generated_functions.contains(function_.name) {
+                    println("// Skipping function_gen for {} as it was already generated", function_.name)
+                    continue
+                }
+                // FIXME: Set current function ID in the contextk
                 output += generator.codegen_function(function_)
             }
         }
@@ -153,13 +147,15 @@ struct JavascriptCodeGenerator {
         }
 
         if not struct_.generic_parameters.is_empty() {
-            output += "template <"
+            // output += "template <"
+            todo("codegen_struct: Generic")
         }
 
         // FIXME: generic parameter names
 
         if not struct_.generic_parameters.is_empty() {
-            output += "> "
+            // output += "> "
+            todo("codegen_struct: Generic")
         }
 
         match struct_.record_type {
@@ -167,9 +163,24 @@ struct JavascriptCodeGenerator {
                 todo("codegen_struct Class")
             }
             Struct => {
-                output += "struct "
+                output += "function "
                 output += struct_.name
-                output += " { "
+                output += "("
+
+				mut first = true
+                for field_id in struct_.fields.iterator() {
+                    let variable = .program.get_variable(id: field_id)
+                    if variable.name == "this" {
+                        continue
+                    }
+                    if not first {
+                        output += ","
+                    } else {
+                        first = false
+                    }
+                    output += variable.name
+                }
+                output += ") {\n"
             }
             SumEnum => {
                 todo("codegen_struct SumEnum")
@@ -182,10 +193,14 @@ struct JavascriptCodeGenerator {
 
         for field_id in struct_.fields.iterator() {
             let field = .program.get_variable(field_id)
-            output += .codegen_type(field.type_id)
-            output += " "
+            output += "this."
             output += field.name
-            output += ";"
+            output += "/* "
+            output += .codegen_type(field.type_id)
+            output += " */"
+            output += " = "
+            output += field.name
+            output += "\n"
         }
 
         output += "};"
@@ -241,41 +256,41 @@ struct JavascriptCodeGenerator {
         IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
         // IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
-        // IndexedStruct(expr, index) => {
-        //     mut output = ""
-        //     output += "(("
-        //     output += .codegen_expression(expression: expr)
-        //     output += ")"
+        IndexedStruct(expr, index) => {
+            mut output = ""
+            output += "(("
+            output += .codegen_expression(expression: expr)
+            output += ")"
 
-        //     let is_this = match expr {
-        //         Var(var) => var.name == "this"
-        //         else => false
-        //     }
+            let is_this = match expr {
+                Var(var) => var.name == "this"
+                else => false
+            }
 
-        //     if is_this {
-        //         output += "->"
-        //     } else {
-        //         match .program.get_type(expression_type(expr)) {
-        //             RawPtr => {
-        //                 output += "->"
-        //             }
-        //             Struct(struct_id) => {
-        //                 let structure = .program.get_struct(struct_id)
-        //                 if structure.record_type is Class {
-        //                     output += "->"
-        //                 } else {
-        //                     output += "."
-        //                 }
-        //             }
-        //             else => {
-        //                 output += "."
-        //             }
-        //         }
-        //     }
-        //     output += index
-        //     output += ")"
-        //     yield output
-        // }
+            if is_this {
+                output += "->"
+            } else {
+                match .program.get_type(expression_type(expr)) {
+                    RawPtr => {
+                        output += "->"
+                    }
+                    Struct(struct_id) => {
+                        let structure = .program.get_struct(struct_id)
+                        if structure.record_type is Class {
+                            output += "->"
+                        } else {
+                            output += "."
+                        }
+                    }
+                    else => {
+                        output += "."
+                    }
+                }
+            }
+            output += index
+            output += ")"
+            yield output
+        }
         Block(block) => .codegen_block(block)
         Call(call) => .codegen_call(call)
         Boolean(val) => match val {
@@ -478,8 +493,6 @@ struct JavascriptCodeGenerator {
         }
 
         output += "("
-        output += format("'{}'", .codegen_type(type_id))
-        output += ","
         output += .codegen_expression(lhs)
         output += ","
         output += .codegen_expression(rhs)
@@ -551,8 +564,10 @@ struct JavascriptCodeGenerator {
                 output += ")"
             }
             else => {
+                println("// call: {:#}", call)
                 if call.function_id.has_value() {
                     let type_module = .program.get_module(call.function_id!.module)
+                    println("// codegen_call: call namespace {:#}", call.namespace_)
                     if type_module.is_root or type_module.id.id == 0 or .program.get_function(call.function_id!).linkage is External or (not call.namespace_.is_empty() and call.namespace_[0].name == type_module.name)
                     {
                         output += type_module.name
@@ -754,9 +769,9 @@ struct JavascriptCodeGenerator {
         JaktString => "String"
         CChar => "char"
         CInt => "int"
-        RawPtr(type_id) => .codegen_type(type_id) + "*"
+        // RawPtr(type_id) => .codegen_type(type_id) + "*"
         GenericInstance(id, args) => .codegen_generic_type_instance(id, args, as_namespace)
-        Struct(id) => .codegen_struct_type(id, as_namespace)
+        // Struct(id) => .codegen_struct_type(id, as_namespace)
         Enum(id) => .codegen_enum_type(id, as_namespace)
         TypeVariable(name) => name
         else => {
@@ -878,36 +893,45 @@ struct JavascriptCodeGenerator {
     }
 
     function codegen_function_in_namespace(mut this, function_: CheckedFunction, containing_struct: TypeId?) throws -> String {
-        mut output = "function"
-
         let is_main = function_.name == "main" and not containing_struct.has_value()
 
-        // if is_main {
-        //     output += "ErrorOr<int>"
-        // } else {
-        //     if function_.is_static() and not containing_struct.has_value() {
-        //         output += "static "
-        //     }
-        //     output += match function_.can_throw {
-        //         true => format("ErrorOr<{}>", .codegen_type(function_.return_type_id))
-        //         else => .codegen_type(function_.return_type_id)
-        //     }
-        // }
+        match function_.type {
+            FunctionType::ImplicitConstructor => {
+                return ""
+            }
+            else => ""
+        }
 
-        output += " "
+        mut output = ""
 
-        if is_main {
-            output += "main"
+        if containing_struct.has_value() {
+            let type = .program.get_type(id: containing_struct!)
+            let struct_id = match type {
+                Struct(id) => id
+                else => {
+                    todo("Unreachable")
+                    return ""
+                }
+            }
+            let struct_ = .program.get_struct(id: struct_id)
+
+            output += format("{}.prototype.{} = function", struct_.name, function_.name)
         } else {
-            let qualifier = match containing_struct.has_value() {
-                true => .codegen_type_possibly_as_namespace(type_id: containing_struct!, as_namespace: true)
-                else => ""
+            output += "function "
+
+            if is_main {
+                output += "main"
+            } else {
+                let qualifier = match containing_struct.has_value() {
+                    true => .codegen_type_possibly_as_namespace(type_id: containing_struct!, as_namespace: true)
+                    else => ""
+                }
+                if not qualifier.is_empty() {
+                    output += qualifier
+                    output += "::"
+                }
+                output += function_.name
             }
-            if not qualifier.is_empty() {
-                output += qualifier
-                output += "::"
-            }
-            output += function_.name
         }
 
         output += "("
@@ -935,13 +959,7 @@ struct JavascriptCodeGenerator {
             output += variable.name
         }
 
-        output += ")"
-
-        // if not function_.is_static() and not function_.is_mutating() {
-        //     output += " const"
-        // }
-
-        output += "{"
+        output += ") {"
 
         let last_control_flow = .control_flow_state
         .control_flow_state = last_control_flow.enter_function()
@@ -958,7 +976,7 @@ struct JavascriptCodeGenerator {
             }
         }
 
-        output += "}"
+        output += "};"
 
         return output
     }
