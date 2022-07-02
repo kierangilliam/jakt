@@ -1,0 +1,983 @@
+// Copyright (c) 2022, JT <jt@serenityos.org>
+// Copyright (c) 2022, Andreas Kling <kling@serenityos.org>
+//
+// SPDX-License-Identifier: BSD-2-Clause
+
+import parser { BinaryOperator, FunctionLinkage }
+import typechecker {
+    BuiltinType, CheckedBlock, CheckedCall, CheckedExpression,
+    CheckedFunction, CheckedProgram, CheckedStatement, CheckedStruct,
+    ModuleId, ScopeId, FunctionId, StructId, EnumId, Type, TypeId, expression_type }
+import utility { panic, todo }
+
+enum AllowedControlExits {
+    /// No control exit statements allowed
+    Nothing
+    /// Only `return` allowed
+    JustReturn
+    /// `continue`/`break` allowed: `return` is also allowed in this context
+    AtLoop
+
+    function allow_return(this) => match this {
+        Nothing | JustReturn => AllowedControlExits::JustReturn
+        AtLoop => AllowedControlExits::AtLoop
+    }
+}
+
+function are_loop_exits_allowed(anon allowed_control_exits: AllowedControlExits) -> bool => allowed_control_exits is AtLoop
+function is_return_allowed(anon allowed_control_exits: AllowedControlExits) -> bool => not allowed_control_exits is Nothing
+
+struct ControlFlowState {
+    allowed_exits: AllowedControlExits
+    /// Whether `break` and `continue` should use `return ExplicitValueOrControlFlow` instead of
+    /// C++'s `break`/`continue`.
+    passes_through_match: bool
+    match_nest_level: usize
+
+    function no_control_flow() -> ControlFlowState {
+        return ControlFlowState(
+            allowed_exits: AllowedControlExits::Nothing
+            passes_through_match: false
+            match_nest_level: 0
+        )
+    }
+    function enter_function(this) -> ControlFlowState {
+        return ControlFlowState(
+            allowed_exits: AllowedControlExits::JustReturn
+            passes_through_match: false
+            match_nest_level: .match_nest_level
+        )
+    }
+    function enter_loop(this) -> ControlFlowState {
+        return ControlFlowState(
+            allowed_exits: AllowedControlExits::AtLoop
+            passes_through_match: false
+            match_nest_level: 0
+        )
+    }
+    function enter_match(this) -> ControlFlowState {
+        mut level = .match_nest_level
+        if .passes_through_match {
+            level = .match_nest_level + 1
+        }
+        return ControlFlowState(
+            allowed_exits: .allowed_exits.allow_return()
+            passes_through_match: true
+            match_nest_level: level
+        )
+    }
+    function is_match_nested(this) => .match_nest_level != 0
+    function choose_control_flow_macro(this) -> String {
+        if are_loop_exits_allowed(.allowed_exits) {
+            if .is_match_nested() {
+                return "JAKT_RESOLVE_EXPLICIT_VALUE_OR_CONTROL_FLOW_AT_LOOP_NESTED_MATCH"
+            }
+            return "JAKT_RESOLVE_EXPLICIT_VALUE_OR_CONTROL_FLOW_AT_LOOP"
+        }
+        return "JAKT_RESOLVE_EXPLICIT_VALUE_OR_CONTROL_FLOW_RETURN_ONLY"
+    }
+}
+
+struct JavascriptCodeGenerator {
+
+    program: CheckedProgram
+    control_flow_state: ControlFlowState
+    internal_prefix: String
+    entered_yieldable_blocks: [(String, String)] // label, variable name
+
+    function generate(anon program: CheckedProgram) throws -> String {
+        mut generator = JavascriptCodeGenerator(
+            program
+            control_flow_state: ControlFlowState(
+                allowed_exits: AllowedControlExits::Nothing
+                passes_through_match: false
+                match_nest_level: 0
+            )
+            internal_prefix: "__jakt_internal_"
+            entered_yieldable_blocks: []
+        )
+
+        mut output = ""
+
+        mut file = File::open_for_reading("./selfhost/javascript_prelude.js")
+        let file_contents = file.read_all()
+        mut builder = StringBuilder::create();
+        for b in file_contents.iterator() {
+            builder.append(b)
+        }
+
+        output += builder.to_string()
+
+        for module in generator.program.modules.iterator() {
+
+            mut generated_functions: [String] = []
+
+            for struct_ in module.structures.iterator() {
+                output += generator.codegen_struct(struct_)
+                println("// generate: struct {} {}", struct_.name, struct_.scope_id.id)
+                let scope = generator.program.get_scope(id: struct_.scope_id)
+                for function_id in scope.functions.iterator() {
+                    let function_ =  program.get_function(function_id.1)
+                    output += generator.codegen_function_in_namespace(function_, containing_struct: struct_.type_id)
+                    // FIXME: Set current function ID in the context
+                    generated_functions.push(function_.name)
+                }
+            }
+
+            for function_ in module.functions.iterator() {
+                if generated_functions.contains(function_.name) {
+                    println("// Skipping function_gen for {} as it was already generated", function_.name)
+                    continue
+                }
+                // FIXME: Set current function ID in the contextk
+                output += generator.codegen_function(function_)
+            }
+        }
+
+        output += "console.log('Main: ', main())\n"
+
+        return output
+    }
+
+    function codegen_struct(mut this, struct_: CheckedStruct) throws -> String {
+        mut output = ""
+
+        if struct_.definition_linkage is External {
+            return ""
+        }
+
+        if not struct_.generic_parameters.is_empty() {
+            // output += "template <"
+            todo("codegen_struct: Generic")
+        }
+
+        // FIXME: generic parameter names
+
+        if not struct_.generic_parameters.is_empty() {
+            // output += "> "
+            todo("codegen_struct: Generic")
+        }
+
+        match struct_.record_type {
+            Class => {
+                todo("codegen_struct Class")
+            }
+            Struct => {
+                output += "function "
+                output += struct_.name
+                output += "("
+
+				mut first = true
+                for field_id in struct_.fields.iterator() {
+                    let variable = .program.get_variable(id: field_id)
+                    if variable.name == "this" {
+                        continue
+                    }
+                    if not first {
+                        output += ","
+                    } else {
+                        first = false
+                    }
+                    output += variable.name
+                }
+                output += ") {\n"
+            }
+            SumEnum => {
+                todo("codegen_struct SumEnum")
+            }
+            ValueEnum => {
+                todo("codegen_struct ValueEnum")
+            }
+            else => {}
+        }
+
+        for field_id in struct_.fields.iterator() {
+            let field = .program.get_variable(field_id)
+            output += "this."
+            output += field.name
+            output += "/* "
+            output += .codegen_type(field.type_id)
+            output += " */"
+            output += " = "
+            output += field.name
+            output += "\n"
+        }
+
+        output += "};"
+
+        return output
+    }
+
+    function codegen_expression(mut this, anon expression: CheckedExpression) throws -> String => match expression {
+        JaktArray(vals, type_id) => {
+            mut output = "["
+
+            for value in vals.iterator() {
+                output += .codegen_expression(value)
+                output += ", "
+            }
+
+            output += "]"
+
+            return output
+        }
+        // Range(from, to, type_id) => {
+        //     mut output = ""
+        //     let type = .program.get_type(type_id)
+        //     let index_type = match type {
+        //         GenericInstance(id, args) => args[0]
+        //         else => {
+        //             panic("Internal error: range expression doesn't have Range type")
+        //             // FIXME: panic() should be "noreturn" and this can be removed
+        //             yield TypeId(module: ModuleId(id: 0), id: 0)
+        //         }
+        //     }
+        //     output += "("
+        //     output += .codegen_type(type_id)
+        //     output += "{"
+        //     output += "static_cast<"
+        //     output += .codegen_type(index_type)
+        //     output += ">("
+        //     output += .codegen_expression(from)
+        //     output += "),static_cast<"
+        //     output += .codegen_type(index_type)
+        //     output += ">("
+        //     output += .codegen_expression(to)
+        //     output += ")})"
+        //     yield output
+        // }
+        // OptionalNone => "JaktInternal::OptionalNone()"
+        // OptionalSome(expr, type_id) => "(" + .codegen_expression(expr) + ")"
+        // ForcedUnwrap(expr, type_id) => "(" + .codegen_expression(expr) + ".value())"
+        QuotedString(val) => "\"" + val + "\""
+        // ByteConstant(val) => "'" + val + "'"
+        // CharacterConstant(val) => "'" + val + "'"
+        Var(var) => var.name
+        IndexedExpression(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
+        // IndexedDictionary(expr, index) => "((" + .codegen_expression(expr) + ")[" + .codegen_expression(index) + "])"
+        // IndexedTuple(expr, index) => format("(({}).get<{}>())", .codegen_expression(expr), index)
+        IndexedStruct(expr, index) => {
+            mut output = ""
+            output += "(("
+            output += .codegen_expression(expression: expr)
+            output += ")"
+
+            let is_this = match expr {
+                Var(var) => var.name == "this"
+                else => false
+            }
+
+            if is_this {
+                output += "->"
+            } else {
+                match .program.get_type(expression_type(expr)) {
+                    RawPtr => {
+                        output += "->"
+                    }
+                    Struct(struct_id) => {
+                        let structure = .program.get_struct(struct_id)
+                        if structure.record_type is Class {
+                            output += "->"
+                        } else {
+                            output += "."
+                        }
+                    }
+                    else => {
+                        output += "."
+                    }
+                }
+            }
+            output += index
+            output += ")"
+            yield output
+        }
+        Block(block) => .codegen_block(block)
+        Call(call) => .codegen_call(call)
+        Boolean(val) => match val {
+            true => "true"
+            else => "false"
+        }
+        UnaryOp(expr, op, type_id) => {
+            mut output = "("
+            output += match op {
+                PreIncrement => "++"
+                PreDecrement => "--"
+                Negate => "-"
+                Dereference => "*"
+                RawAddress => "&"
+                LogicalNot => "!"
+                BitwiseNot => "~"
+                Is => {
+                    todo("codegen Is")
+                    yield ""
+                }
+                TypeCast(cast) => {
+                    todo("codegen TypeCast")
+                    let is_integer = .program.is_integer(cast.type_id())
+                    yield match cast {
+                        Fallible => {
+                            mut cast_type = "dynamic_cast"
+                            if is_integer {
+                                cast_type = "fallible_integer_cast"
+                            }
+                            yield cast_type
+                        }
+                        Infallible => {
+                            mut cast_type = "verify_cast"
+                            if is_integer {
+                                cast_type = "infallible_integer_cast"
+                            }
+                            yield cast_type
+                        }
+                    } + "<" + .codegen_type(cast.type_id()) + ">("
+                }
+                else => ""
+            }
+            output += .codegen_expression(expr)
+            output += match op {
+                PostIncrement => "++"
+                PostDecrement => "--"
+                TypeCast | Is => ")"
+                IsEnumVariant => {
+                    todo("codegen IsEnumVariant")
+                    yield ""
+                }
+                else => ""
+            }
+            output += ")"
+            yield output
+        }
+        BinaryOp(lhs, rhs, op, type_id) => .codegen_binary_expression(expression, type_id, lhs, rhs, op)
+        NumericConstant(val, type_id) => {
+            let type_name = match val {
+                USize => "size_t"
+                else => .codegen_type(type_id)
+            }
+
+            yield match val {
+                F32(val)
+                | F64(val)
+                | I8(val)
+                | I16(val)
+                | I32(val)
+                | I64(val)
+                | U8(val)
+                | U16(val)
+                | U32(val)
+                | U64(val)
+                | USize(val)
+                => format("{}{}({})", .internal_prefix, type_name, val)
+            }
+        }
+        else => {
+            todo(format("codegen_expression else: {}", expression))
+            yield ""
+        }
+    }
+
+    function codegen_binary_expression(mut this, expression: CheckedExpression, type_id: TypeId, lhs: CheckedExpression, rhs: CheckedExpression, op: BinaryOperator) throws -> String {
+        if op is NoneCoalescing {
+            todo(format("codegen {}", op))
+            return ""
+        }
+
+        if op is NoneCoalescingAssign {
+            // mut output = .codegen_expression(lhs)
+            // output += ".lazy_emplace([&] { return "
+            // output += .codegen_expression(rhs)
+            // output += "; })"
+            // return output
+            todo("NoneCoalescingAssign")
+        }
+
+        if op is ArithmeticRightShift {
+            // mut output = "JaktInternal::arithmetic_shift_right("
+            // output += .codegen_expression(lhs)
+            // output += ","
+            // output += .codegen_expression(rhs)
+            // output += ")"
+            // return output
+            todo("ArithmeticRightShift")
+        }
+
+        if op is Assign and lhs is IndexedDictionary {
+            todo("IndexedDictionary")
+            // match lhs {
+            //     IndexedDictionary(expr, index) => {
+            //         mut output = .codegen_expression(expr)
+            //         output += ".set("
+            //         output += .codegen_expression(index)
+            //         output += ", "
+            //         output += .codegen_expression(rhs)
+            //         output += "))"
+            //     }
+            //     else => {
+            //         // FIXME: unreachable
+            //     }
+            // }
+        }
+
+        if .program.is_integer(type_id) {
+            // Integer arithmetic is checked by default.
+            match op {
+                Add | Subtract | Multiply | Divide | Modulo => {
+                    return "(" + .codegen_checked_binary_op(lhs, rhs, op, type_id) + ")"
+                }
+                AddAssign | SubtractAssign | MultiplyAssign | DivideAssign | ModuloAssign => {
+                    todo("AddAssign | SubtractAssign | MultiplyAssign | DivideAssign | ModuloAssign")
+                    return "(" + .codegen_checked_binary_op_assignment(lhs, rhs, op, type_id) + ")"
+                }
+                else => { }
+            }
+        }
+
+        mut output = "("
+
+        output += .codegen_expression(lhs)
+        output += match op {
+            Add => " + "
+            Subtract => " - "
+            Multiply => " * "
+            Modulo => " % "
+            Divide => " / "
+            Assign => " = "
+            AddAssign => " += "
+            SubtractAssign => " -= "
+            MultiplyAssign => " *= "
+            ModuloAssign => " %= "
+            DivideAssign => " /= "
+            BitwiseAndAssign => " &= "
+            BitwiseOrAssign => " |= "
+            BitwiseXorAssign => " ^= "
+            BitwiseLeftShiftAssign => " <<= "
+            BitwiseRightShiftAssign => " >>= "
+            Equal => " == "
+            NotEqual => " != "
+            LessThan => " < "
+            LessThanOrEqual => " <= "
+            GreaterThan => " > "
+            GreaterThanOrEqual => " >= "
+            LogicalAnd => " && "
+            LogicalOr => " || "
+            BitwiseAnd => " & "
+            BitwiseOr => " | "
+            BitwiseXor => " ^ "
+            ArithmeticLeftShift => " << "
+            BitwiseLeftShift => " << "
+            BitwiseRightShift => " >> "
+            else => {
+                todo(format("codegen_binary_expression {}", op))
+                yield ""
+            }
+        }
+        output += .codegen_expression(rhs)
+
+        output += ")"
+        return output
+    }
+
+    function codegen_checked_binary_op(mut this, lhs: CheckedExpression, rhs: CheckedExpression, op: BinaryOperator, type_id: TypeId) throws -> String {
+        mut output = ""
+        output += .internal_prefix
+
+        output += match op {
+            Add => "checked_add"
+            Subtract => "checked_sub"
+            Multiply => "checked_mul"
+            Divide => "checked_div"
+            Modulo => "checked_mod"
+            else => {
+                panic(format("Checked binary operation codegen is not supported for BinaryOperator::{}", op))
+                yield ""
+            }
+        }
+
+        output += "("
+        output += .codegen_expression(lhs)
+        output += ","
+        output += .codegen_expression(rhs)
+        output += ")"
+
+        return output
+    }
+
+    function codegen_checked_binary_op_assignment(mut this, lhs: CheckedExpression, rhs: CheckedExpression, op: BinaryOperator, type_id: TypeId) throws -> String {
+        mut output = ""
+
+        output += "{"
+        output += "auto& _jakt_ref = "
+        output += .codegen_expression(lhs)
+        output += ";"
+        output += "_jakt_ref = JaktInternal::"
+        output += match op {
+            AddAssign => "checked_add"
+            SubtractAssign => "checked_sub"
+            MultiplyAssign => "checked_mul"
+            DivideAssign => "checked_div"
+            ModuloAssign => "checked_mod"
+            else => {
+                panic(format("Checked binary operation assignment codegen is not supported for BinaryOperator::{}", op))
+                yield ""
+            }
+        }
+        output += "<"
+        output += .codegen_type(type_id)
+        output += ">(_jakt_ref, "
+        output += .codegen_expression(rhs)
+        output += ");"
+        output += "}"
+        return output
+    }
+
+    function codegen_call(mut this, call: CheckedCall) throws -> String {
+        mut output = ""
+
+        if call.callee_throws {
+            output += "TRY(() =>"
+        }
+        match call.name {
+            "print" | "println" | "eprintln" | "format" => {
+                let fmt = format("{}format", .internal_prefix)
+
+                let helper = match call.name {
+                    "print" => format("console.log({}", fmt)
+                    "println" => format("console.log({}", fmt)
+                    "eprintln" => format("console.warn({}", fmt)
+                    "format" => fmt
+                    else => ""
+                }
+                output += helper
+                output += "("
+                for i in 0..call.args.size() {
+                    let expr = call.args[i].1
+                    output += .codegen_expression(expr)
+                    if i != call.args.size() - 1 {
+                        output += ","
+                    }
+                }
+                output += match call.name {
+                    "print" => ")"
+                    "println" => ")"
+                    "eprintln" => ")"
+                    else => ""
+                }
+                output += ")"
+            }
+            else => {
+                println("// call: {:#}", call)
+                if call.function_id.has_value() {
+                    let type_module = .program.get_module(call.function_id!.module)
+                    println("// codegen_call: call namespace {:#}", call.namespace_)
+                    if type_module.is_root or type_module.id.id == 0 or .program.get_function(call.function_id!).linkage is External or (not call.namespace_.is_empty() and call.namespace_[0].name == type_module.name)
+                    {
+                        output += type_module.name
+                        output += "::"
+                    }
+                }
+
+                output += .codegen_namespace_path(call)
+                output += call.name
+                output += "("
+
+                mut first = true
+                for arg in call.args.iterator() {
+                    if first {
+                        first = false
+                    } else {
+                        output += ","
+                    }
+                    output += .codegen_expression(arg.1)
+                }
+
+                output += ")"
+            }
+        }
+
+        if call.callee_throws {
+            output += ")()"
+        }
+
+        return output
+    }
+
+    function codegen_namespace_path(this, call: CheckedCall) throws -> String {
+        mut output = ""
+
+        mut index: usize = 0
+
+        for namespace_ in call.namespace_.iterator() {
+            // hack warning: this is to get around C++'s limitation that a constructor
+            // can't be called like other static methods
+            if index == call.namespace_.size() - 1 and namespace_.name == call.name {
+                break
+            }
+
+            output += namespace_.name
+            if namespace_.generic_parameters.has_value() {
+                output += "<"
+                mut i: usize = 0
+                for param in namespace_.generic_parameters!.iterator() {
+                    output += .codegen_type(param)
+                    if i != namespace_.generic_parameters!.size() - 1 {
+                        output += ","
+                    }
+                    ++i
+                }
+                output += ">"
+            }
+            output += "::"
+
+            ++index
+        }
+        return output
+    }
+
+    function codegen_block(mut this, block: CheckedBlock) throws -> String {
+        mut output = ""
+
+        // FIXME: yielded_type
+
+        output += "{"
+
+        for statement in block.statements.iterator() {
+            output += .codegen_statement(statement)
+        }
+
+        output += "}"
+
+        // FIXME: yielded_type
+
+        return output
+    }
+
+    function codegen_statement(mut this, statement: CheckedStatement) throws -> String => match statement {
+        // Throw(expression) => "return " + .codegen_expression(expression) + ";"
+        // Continue => match .control_flow_state.passes_through_match {
+        //     true => "return JaktInternal::LoopContinue{};"
+        //     else => "continue;"
+        // }
+        // Break => match .control_flow_state.passes_through_match {
+        //     true => "return JaktInternal::LoopBreak{};"
+        //     else => "break;"
+        // }
+        Expression(expr) => .codegen_expression(expr) + ";\n"
+        Defer(statement) => {
+            // NOTE: We let the preprocessor generate a unique name for the RAII helper.
+            mut output = ""
+            output += "\n#define __SCOPE_GUARD_NAME __scope_guard_ ## __COUNTER__\n"
+            output += "ScopeGuard __SCOPE_GUARD_NAME ([&] \n"
+            output += "#undef __SCOPE_GUARD_NAME\n{"
+            {
+                let last_control_flow = .control_flow_state
+                .control_flow_state.passes_through_match = false
+                output += .codegen_statement(statement)
+                output += "});\n"
+                .control_flow_state = last_control_flow
+            }
+            yield output
+        }
+        Return(val) => match val.has_value() {
+            true => "return (" + .codegen_expression(val!) + ");\n"
+            else => "return;\n"
+        }
+        // Loop(block) => {
+        //     mut output = ""
+        //     output += "for (;;) {"
+        //     let last_control_flow = .control_flow_state
+        //     .control_flow_state = last_control_flow.enter_loop()
+        //     let block_str = .codegen_block(block)
+        //     .control_flow_state = last_control_flow
+        //     output += block_str
+        //     output += "}"
+        //     yield output
+        // }
+        While(condition, block) => {
+            mut output = ""
+            output += "while ("
+            output += .codegen_expression(expression: condition)
+            output += ") "
+            {
+                let last_control_flow = .control_flow_state
+                .control_flow_state = last_control_flow.enter_loop()
+                let code = .codegen_block(block)
+                .control_flow_state = last_control_flow
+                output += code
+            }
+            yield output
+        }
+        Block(block) => .codegen_block(block)
+        Garbage => {
+            panic("Garbage statement in codegen")
+            // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
+            yield ""
+        }
+        VarDecl(var_id, init) => {
+            let var = .program.get_variable(var_id)
+
+            mut output = ""
+            if not var.is_mutable {
+                output += "const "
+            }
+            // output += .codegen_type(var.type_id)
+            // output += " "
+            output += var.name
+            output += " = "
+            output += .codegen_expression(init)
+            output += ";\n"
+            yield output
+        }
+        If(condition, then_block, else_statement) => {
+            mut output = "if ("
+            output += .codegen_expression(condition)
+            output += ") "
+            output += .codegen_block(block: then_block)
+
+            output += match else_statement.has_value() {
+                true => " else " + .codegen_statement(statement: else_statement!)
+                else => ""
+            }
+
+            yield output
+        }
+        else => {
+            eprintln("Missing statement codegen for {}", statement)
+            todo("codegen_statement")
+            // FIXME: panic() should be `noreturn` and no `yield` should be necessary:
+            yield ""
+        }
+    }
+
+
+    function codegen_type(this, anon type_id: TypeId) throws -> String {
+        return .codegen_type_possibly_as_namespace(type_id, as_namespace: false)
+    }
+
+    function codegen_type_possibly_as_namespace(this, type_id: TypeId, as_namespace: bool) throws -> String => match .program.get_type(type_id) {
+        Void => "void"
+        Bool => "bool"
+        U8 => "u8"
+        U16 => "u16"
+        U32 => "u32"
+        U64 => "u64"
+        I8 => "i8"
+        I16 => "i16"
+        I32 => "i32"
+        I64 => "i64"
+        F32 => "f32"
+        F64 => "f64"
+        Usize => "size_t"
+        JaktString => "String"
+        CChar => "char"
+        CInt => "int"
+        // RawPtr(type_id) => .codegen_type(type_id) + "*"
+        GenericInstance(id, args) => .codegen_generic_type_instance(id, args, as_namespace)
+        // Struct(id) => .codegen_struct_type(id, as_namespace)
+        Enum(id) => .codegen_enum_type(id, as_namespace)
+        TypeVariable(name) => name
+        else => {
+            todo(format("codegen_type else: {}", .program.get_type(type_id)))
+            yield ""
+        }
+    }
+
+    function codegen_generic_type_instance(this, id: StructId, args: [TypeId], as_namespace: bool) throws -> String {
+        // FIXME: Handle WeakPtr
+        mut output = ""
+        let type_module = .program.get_module(id.module)
+        if not (type_module.is_root or type_module.id.id == 0) {
+            output += type_module.name
+            output += "::"
+        }
+        let struct_ = .program.get_struct(id)
+        let acquired_by_ref = not as_namespace and struct_.record_type is Class
+        if acquired_by_ref {
+            output += "NonnullRefPtr<"
+        }
+        output += .codegen_namespace_qualifier(scope_id: struct_.scope_id)
+        output += struct_.name
+        output += "<"
+        mut first = true
+        for type_id in args.iterator() {
+            if not first {
+                output += ","
+            } else {
+                first = false
+            }
+            output += .codegen_type(type_id)
+        }
+        output += ">"
+        if acquired_by_ref {
+            output += ">"
+        }
+        return output
+    }
+
+    function codegen_namespace_qualifier(this, scope_id: ScopeId) throws -> String {
+        mut output = ""
+        mut current_scope_id = .program.get_scope(scope_id).parent
+
+        while current_scope_id.has_value() {
+            let scope = .program.get_scope(current_scope_id!)
+            if scope.namespace_name.has_value() {
+                let namespace_name = scope.namespace_name!
+                output = format("{}::{}", namespace_name, output)
+            }
+            current_scope_id = scope.parent
+        }
+        return output
+    }
+
+    function codegen_function(mut this, anon function_: CheckedFunction) throws -> String {
+        let none: TypeId? = None
+        return .codegen_function_in_namespace(function_, containing_struct: none)
+    }
+
+    function codegen_struct_type(this, id: StructId, as_namespace: bool) throws -> String {
+        mut output = ""
+        let type_module = .program.get_module(id.module)
+        let checked_struct = .program.get_struct(id)
+
+        if not as_namespace and checked_struct.record_type is Class {
+            output += "NonnullRefPtr<"
+            if not type_module.is_root or type_module.id.equals(ModuleId(id: 0)) {
+                output += type_module.name
+                output += "::"
+            }
+            output += .codegen_namespace_qualifier(scope_id: checked_struct.scope_id)
+            output += checked_struct.name
+            output += ">"
+        } else {
+            if not (type_module.is_root or type_module.id.equals(ModuleId(id: 0))  or checked_struct.definition_linkage is External) {
+                output += type_module.name
+                output += "::"
+            }
+            output += .codegen_namespace_qualifier(scope_id: checked_struct.scope_id)
+            output += checked_struct.name
+        }
+
+        return output
+    }
+
+    function codegen_enum_type(this, id: EnumId, as_namespace: bool) throws -> String {
+        mut output = ""
+        let type_module = .program.get_module(id.module)
+        let checked_enum = .program.get_enum(id)
+
+        if not as_namespace and checked_enum.record_type is Class {
+            output += "NonnullRefPtr<"
+            if not (type_module.is_root or type_module.id.equals(ModuleId(id: 0))) {
+                output += type_module.name
+                output += "::"
+            }
+            let qualifier = .codegen_namespace_qualifier(scope_id: checked_enum.scope_id)
+            if not qualifier.is_empty() {
+                output += "typename "
+                output += qualifier
+            }
+            output += checked_enum.name
+            output += ">"
+        } else {
+            if not (type_module.is_root or type_module.id.equals(ModuleId(id: 0))) {
+                output += type_module.name
+                output += "::"
+            }
+            let qualifier = .codegen_namespace_qualifier(scope_id: checked_enum.scope_id)
+            if not qualifier.is_empty() {
+                output += "typename "
+                output += qualifier
+            }
+            output += checked_enum.name
+        }
+
+        return output
+    }
+
+    function codegen_function_in_namespace(mut this, function_: CheckedFunction, containing_struct: TypeId?) throws -> String {
+        let is_main = function_.name == "main" and not containing_struct.has_value()
+
+        match function_.type {
+            FunctionType::ImplicitConstructor => {
+                return ""
+            }
+            else => ""
+        }
+
+        mut output = ""
+
+        if containing_struct.has_value() {
+            let type = .program.get_type(id: containing_struct!)
+            let struct_id = match type {
+                Struct(id) => id
+                else => {
+                    todo("Unreachable")
+                    return ""
+                }
+            }
+            let struct_ = .program.get_struct(id: struct_id)
+
+            output += format("{}.prototype.{} = function", struct_.name, function_.name)
+        } else {
+            output += "function "
+
+            if is_main {
+                output += "main"
+            } else {
+                let qualifier = match containing_struct.has_value() {
+                    true => .codegen_type_possibly_as_namespace(type_id: containing_struct!, as_namespace: true)
+                    else => ""
+                }
+                if not qualifier.is_empty() {
+                    output += qualifier
+                    output += "::"
+                }
+                output += function_.name
+            }
+        }
+
+        output += "("
+
+        if is_main and function_.params.is_empty() {
+            output += "...args"
+        }
+
+        mut first = true
+        for param in function_.params.iterator() {
+            let variable = param.variable
+            if variable.name == "this" {
+                continue
+            }
+            if not first {
+                output += ","
+            } else {
+                first = false
+            }
+            // if not variable.is_mutable {
+            //     output += "const "
+            // }
+            // output += .codegen_type(variable.type_id)
+            // output += " "
+            output += variable.name
+        }
+
+        output += ") {"
+
+        let last_control_flow = .control_flow_state
+        .control_flow_state = last_control_flow.enter_function()
+        let block = .codegen_block(block: function_.block)
+        .control_flow_state = last_control_flow
+        output += block
+
+        if is_main {
+            output += "return 0;"
+        } else {
+            // FIXME: This should check if the id is BuiltinType::Void, but the baseline compiler chokes on that.
+            if function_.can_throw and function_.return_type_id.id == 0 {
+                output += "return {};"
+            }
+        }
+
+        output += "};"
+
+        return output
+    }
+}
